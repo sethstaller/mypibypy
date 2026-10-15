@@ -65,6 +65,12 @@ class Candidate:
         return abs(self.left.tm - self.right.tm)
 
 
+#: Minimum bases between two tiled footprints, on top of being non-overlapping.
+#: The lab's own measurements fit 4-7 pairs across a real enhancer at 3 nt, so
+#: 3 is the default rather than a guess.
+DEFAULT_MIN_SPACING_NT = 3
+
+
 @dataclass
 class ProbePair:
     locus: str
@@ -513,3 +519,68 @@ def scan_transcript(transcript_seq: str, accession: str, top: int = 5,
                                      absolute + 1, absolute + FOOTPRINT),
         ))
     return out[:top]
+
+
+# --- Tiling ----------------------------------------------------------------
+
+def select_tiled(candidates: list[Candidate], n_pairs: int,
+                 min_spacing: int = DEFAULT_MIN_SPACING_NT) -> list[Candidate]:
+    """Pick up to `n_pairs` non-overlapping footprints, best-ranked first.
+
+    Greedy over the existing ranking: walk candidates in score order and keep
+    each one that clears every footprint already chosen by at least
+    `min_spacing` bases. Greedy rather than optimal on purpose -- maximising the
+    *count* of packed footprints would start preferring mediocre windows over
+    good ones, and the reason to tile is more signal from good pairs, not more
+    pairs.
+
+    Returned in transcript/genomic order, which is how an order sheet and a
+    locus sheet want to read them, not in score order.
+
+    `n_pairs == 1` returns exactly ``[candidates[0]]``, so a single-pair design
+    is unchanged by this function existing.
+    """
+    if n_pairs < 1:
+        raise ValueError(f"n_pairs must be >= 1, got {n_pairs}")
+    if min_spacing < 0:
+        raise ValueError(f"min_spacing must be >= 0, got {min_spacing}")
+    if not candidates:
+        return []
+    if n_pairs == 1:
+        return [candidates[0]]
+    chosen: list[Candidate] = []
+    for cand in candidates:
+        clear = all(
+            abs(cand.offset - other.offset) >= FOOTPRINT + min_spacing
+            for other in chosen
+        )
+        if clear:
+            chosen.append(cand)
+            if len(chosen) == n_pairs:
+                break
+    return sorted(chosen, key=lambda c: c.offset)
+
+
+def tiled_names(gene: str, name: str, index: int, n_total: int) -> tuple[str, str]:
+    """(P1L name, P1R name) for pair `index` of `n_total`.
+
+    A single-pair design gets exactly the names it always had -- no suffix -- so
+    the three verified designs stay reproducible. Multiple pairs are numbered
+    from 1 and zero-padded to two digits, which keeps them sorting correctly in
+    a spreadsheet past nine pairs.
+    """
+    if n_total <= 1:
+        return f"P1L_{gene}_{name}", f"P1R_{gene}_{name}"
+    return (f"P1L_{gene}_{name}_t{index + 1:02d}",
+            f"P1R_{gene}_{name}_t{index + 1:02d}")
+
+
+def build_tiled_pairs(locus_name: str, gene: str, system: AmplifierSystem,
+                      candidates: list[Candidate]) -> list[ProbePair]:
+    """One ProbePair per selected candidate, named for its position in the tile."""
+    n = len(candidates)
+    pairs = []
+    for i, cand in enumerate(candidates):
+        p1l_name, p1r_name = tiled_names(gene, locus_name, i, n)
+        pairs.append(build_pair(locus_name, system, cand, p1l_name, p1r_name))
+    return pairs

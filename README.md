@@ -30,6 +30,7 @@ python -m mypibypy batch  --loci loci.local.json -o order.xlsx
 python -m mypibypy fusion --loci loci.local.json -o fusion_order.xlsx
 python -m mypibypy rna    --loci loci.local.json -o rna_order.xlsx \
     --transcriptome-index /path/to/gencode/transcripts
+python -m mypibypy batch  --loci loci.local.json -o order.xlsx --pairs 6
 ```
 
 ## What is in here
@@ -38,7 +39,7 @@ python -m mypibypy rna    --loci loci.local.json -o rna_order.xlsx \
 |---|---|
 | [`mypibypy/`](mypibypy/) | the package, its tests, and [the real README](mypibypy/README.md) |
 | [`mypibypy/src/mypibypy/`](mypibypy/src/mypibypy/) | design, screening and workbook modules |
-| [`mypibypy/tests/`](mypibypy/tests/) | 245 tests; aligner-, folding- and network-backed ones skip when unavailable |
+| [`mypibypy/tests/`](mypibypy/tests/) | 273 tests; aligner-, folding- and network-backed ones skip when unavailable |
 | [`mypibypy/scripts/`](mypibypy/scripts/) | threshold calibration and backend sensitivity benchmarks |
 
 ## No sequences in this repository

@@ -125,7 +125,12 @@ def _notes_sheet(wb, results, source_note):
         ("Footprint", "25-nt left pad + 1-nt gap + 25-nt right pad = 51 nt; probes hybridize to the plus strand", None),
         ("P1L", "arm_left + revcomp(left25)", None),
         ("P1R", "revcomp(right25) + arm_right", None),
-        ("New oligos to order", f"{2 * len(results)} ssDNA P1 primaries (see ORDER_ssDNA)", None),
+        ("New oligos to order",
+         f"{sum(2 * r.n_pairs for r in results)} ssDNA P1 primaries "
+         f"(see ORDER_ssDNA)"
+         + (f"; {len(results)} locus/loci tiled with "
+            f"{', '.join(str(r.n_pairs) for r in results)} pair(s) each"
+            if any(r.tiled for r in results) else ""), None),
         ("Reused (in hand)", "; ".join(reused), None),
         ("", "", None),
         ("Loci", "", H),
@@ -207,13 +212,14 @@ def _order_sheet(wb, results):
     _hdr(ws, 4, ["NAME", "SEQUENCE", "LENGTH"], widths=[22, 60, 10])
     r = 5
     for res in results:
-        for name, seq in ((res.pair.p1l_name, res.pair.p1l), (res.pair.p1r_name, res.pair.p1r)):
-            ws.cell(row=r, column=1, value=name).font = B
-            cs = ws.cell(row=r, column=2, value=seq); cs.font = MONO
-            cl = ws.cell(row=r, column=3, value=f"=LEN(B{r})"); cl.font = B
-            for col in (1, 2, 3):
-                ws.cell(row=r, column=col).fill = NEW_FILL
-            r += 1
+        for pair in res.pairs:
+            for name, seq in ((pair.p1l_name, pair.p1l), (pair.p1r_name, pair.p1r)):
+                ws.cell(row=r, column=1, value=name).font = B
+                cs = ws.cell(row=r, column=2, value=seq); cs.font = MONO
+                cl = ws.cell(row=r, column=3, value=f"=LEN(B{r})"); cl.font = B
+                for col in (1, 2, 3):
+                    ws.cell(row=r, column=col).fill = NEW_FILL
+                r += 1
     ws.freeze_panes = "A5"
     return ws
 
@@ -225,8 +231,13 @@ def _parts_sheet(wb, results):
     r = 4
     for res in results:
         ch = res.system.fluorophore
-        for name, seq in ((res.pair.p1l_name, res.pair.p1l), (res.pair.p1r_name, res.pair.p1r)):
-            _part_row(ws, r, name, seq, "NEW", ch, NEW_FILL); r += 1
+        # Every tiled pair is a NEW oligo to order. The P2/P3/P4 amplifiers below
+        # stay REUSED however many pairs there are -- that is the whole point of
+        # tiling into an existing pool, and the count of reused parts must not
+        # grow with the number of pairs.
+        for pair in res.pairs:
+            for name, seq in ((pair.p1l_name, pair.p1l), (pair.p1r_name, pair.p1r)):
+                _part_row(ws, r, name, seq, "NEW", ch, NEW_FILL); r += 1
     seen = set()
     for res in results:
         s = res.system
@@ -249,7 +260,62 @@ def _part_row(ws, r, name, seq, status, channel, fill):
         ws.cell(row=r, column=col).fill = fill
 
 
+def _tiled_locus_sheet(wb, res):
+    """Per-locus sheet for a tiled design: one row per ordered pair.
+
+    A separate layout rather than a generalised one, so the single-pair sheet
+    stays byte-identical -- the three verified designs must keep regenerating
+    exactly. Reads as a table because that is what someone checking ten pairs
+    wants; the single-pair sheet reads as a form because that is what someone
+    checking one wants.
+    """
+    L, sysm = res.locus, res.system
+    ws = wb.create_sheet(_sheet_title(wb, f"{L.gene}_{L.name}"))
+    ws.cell(row=1, column=1, value=f"{L.gene} {L.name} - {L.description}").font = TITLE
+    ws.cell(row=2, column=1, value=(
+        f"{res.n_pairs} tiled pairs into {sysm.fluorophore} (system {sysm.name}); "
+        f"target region {L.interval}; {2 * res.n_pairs} new ssDNA oligos. "
+        f"Each pair is screened independently -- see the per-pair columns."
+    )).font = B
+    ws.cell(row=2, column=1).alignment = Alignment(wrap_text=True, vertical="top")
+
+    headers = ["#", "Footprint", "left25 (plus)", "gap", "right25 (plus)",
+               "GC L/R", "Tm L/R", "QC flags", "P1L name", "P1L sequence",
+               "P1R name", "P1R sequence", "Genome screen", "Accessibility"]
+    _hdr(ws, 4, headers,
+         widths=[4, 26, 27, 5, 27, 11, 13, 24, 22, 52, 22, 52, 46, 46])
+    r = 5
+    for i, (pair, screen, access) in enumerate(res.rows(), start=1):
+        cand = pair.candidate
+        values = [
+            i, str(cand.interval), cand.left.seq, cand.gap_base, cand.right.seq,
+            f"{cand.left.gc*100:.0f}%/{cand.right.gc*100:.0f}%",
+            f"{cand.left.tm:.1f}/{cand.right.tm:.1f}",
+            ", ".join(cand.flags) or "none",
+            pair.p1l_name, pair.p1l, pair.p1r_name, pair.p1r,
+            _specificity_text(screen), _accessibility_text(access),
+        ]
+        for j, v in enumerate(values, start=1):
+            cell = ws.cell(row=r, column=j, value=v)
+            cell.font = MONO if j in (3, 5, 10, 12) else B
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+        # Flag the pairs a reader must look at, rather than leaving them to
+        # find the one bad row in ten.
+        if not screen.screened or screen.verdict == "fail":
+            ws.cell(row=r, column=13).fill = WARN_FILL
+        if access.evaluated and access.pair_nucleation_p < 0.2:
+            ws.cell(row=r, column=14).fill = WARN_FILL
+        r += 1
+    ws.freeze_panes = "B5"
+    r += 1
+    ws.cell(row=r, column=1, value="Region sequence (plus, 5'->3')").font = H
+    ws.cell(row=r, column=2, value=res.region_seq).font = MONO
+    return ws
+
+
 def _locus_sheet(wb, res):
+    if res.tiled:
+        return _tiled_locus_sheet(wb, res)
     L, c, p, s = res.locus, res.best, res.pair, res.system
     ws = wb.create_sheet(_sheet_title(wb, f"{L.gene}_{L.name}"))
     ws.column_dimensions["A"].width = 24

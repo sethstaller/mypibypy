@@ -74,7 +74,7 @@ pip install -e .          # from this directory
 Then configure your amplifier systems (see below) and run the tests:
 
 ```bash
-pytest                    # 245 tests, no PYTHONPATH needed
+pytest                    # 273 tests, no PYTHONPATH needed
 ```
 
 ## Usage
@@ -333,6 +333,45 @@ export SSL_CERT_FILE=$PWD/roots.pem
 
 The error message says this too. The same applies to the UCSC fetch used by
 genomic designs.
+
+## Tiling: several pairs per target
+
+`design.scan` always ranked many windows, but only the best became a pair. One
+pair is defensible — at ~100x amplification per pair, and every validated design
+in the lab is single-pair — so **tiling is headroom for marginal signal, not a
+fix for a defect.** For scale: the pi-FISH paper used 35–50 probes per DNA locus
+per channel, and for RNA roughly 10–15 pairs per transcript at medium-to-low
+abundance, 1–5 for a highly abundant one.
+
+```bash
+python -m mypibypy batch --loci loci.local.json -o order.xlsx --pairs 6
+python -m mypibypy rna   --loci loci.local.json -o rna.xlsx   --pairs 10 \
+    --transcriptome-index /path/to/gencode/transcripts
+```
+
+- Selection is greedy over the existing ranking: walk candidates best-first and
+  keep each that clears every chosen footprint by `--min-spacing` (default 3 nt)
+  on top of not overlapping. Greedy rather than optimal on purpose — maximising
+  the *count* of packed footprints would start preferring mediocre windows, and
+  the reason to tile is more signal from good pairs.
+- **Every selected pair is screened**, and for RNA has its accessibility
+  evaluated, separately. Screening only the best and ordering ten would be worse
+  than not tiling, since the unchecked nine look just as validated on the sheet.
+  In a real run one of five tiled pairs came back with 17 off-target half-hits
+  where the others had none.
+- Asking for more pairs than fit returns what fits and warns, rather than
+  failing.
+- **Fusion junctions refuse `--pairs > 1`** rather than ignoring it. A junction
+  is a single position — the design *is* the 1-nt gap on the breakpoint — and a
+  second pair could only lie wholly inside one partner, where it reports that
+  gene unfused, which is the one thing a fusion probe exists to rule out.
+  (Sense and antisense are a separate axis and still both emitted.)
+- Names gain a `_t01` suffix only when tiling. **A single-pair design is
+  byte-identical to before tiling existed** — same names, same form-style locus
+  sheet, same notes — verified by diffing a regenerated workbook against a
+  pre-change snapshot, not assumed. A tiled locus sheet becomes a table with one
+  row per pair, and the REUSED amplifier count does not grow with pair count,
+  which is the whole point of tiling into an existing pool.
 
 ## Recording what happened
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 import re
 
-from .design import PADS_AS_ORDERED, PADS_DIRECT
+from .design import DEFAULT_MIN_SPACING_NT, PADS_AS_ORDERED, PADS_DIRECT
 from .loci import (
     Locus,
     is_example,
@@ -49,14 +49,30 @@ def _parse_region(build: str, s: str) -> GenomicInterval:
 
 def _report(results):
     for res in results:
-        p = res.pair
         print(f"\n{res.locus.gene} {res.locus.name} -> {res.system.fluorophore}: "
               f"footprint {res.best.interval}  (rmsk hits: {len(res.rmsk)})")
-        print(f"  {p.p1l_name}: {p.p1l}")
-        print(f"  {p.p1r_name}: {p.p1r}")
-        print(f"  specificity: {res.specificity.summary()}")
+        if res.tiled:
+            print(f"  {res.n_pairs} tiled pairs:")
+        for pair, screen, _ in res.rows():
+            print(f"  {pair.p1l_name}: {pair.p1l}")
+            print(f"  {pair.p1r_name}: {pair.p1r}")
+            print(f"    specificity: {screen.summary()}")
         if res.accessibility.evaluated:
             print(f"  accessibility: {res.accessibility.summary()}")
+
+
+def _tiling_options(ap, *, allow: bool = True):
+    """--pairs / --min-spacing. Fusion omits them: a junction is one position."""
+    if not allow:
+        return
+    ap.add_argument("--pairs", type=int, default=1, metavar="N",
+                    help="tile N non-overlapping pairs across the target "
+                         "(default 1). One pair already works at ~100x "
+                         "amplification; use this for marginal signal")
+    ap.add_argument("--min-spacing", type=int, default=DEFAULT_MIN_SPACING_NT,
+                    metavar="NT",
+                    help=f"minimum bases between tiled footprints "
+                         f"(default {DEFAULT_MIN_SPACING_NT})")
 
 
 def _specificity_options(ap):
@@ -105,6 +121,7 @@ def main(argv=None):
     b = sub.add_parser("batch", help="design every locus in a loci file")
     b.add_argument("--loci", help="path to a loci JSON file (default: search order, see docs)")
     b.add_argument("-o", "--out", required=True)
+    _tiling_options(b)
     _specificity_options(b)
 
     f = sub.add_parser("fusion", help="design every fusion junction in a loci file")
@@ -133,6 +150,7 @@ def main(argv=None):
                         "and the probe cannot invade it")
     r.add_argument("--no-screen", action="store_true",
                    help="skip the specificity screen entirely")
+    _tiling_options(r)
 
     d = sub.add_parser("design", help="design one locus given on the command line")
     d.add_argument("--build", required=True)
@@ -141,6 +159,7 @@ def main(argv=None):
     d.add_argument("--gene", default="gene")
     d.add_argument("--name", default="locus")
     d.add_argument("-o", "--out", required=True)
+    _tiling_options(d)
     _specificity_options(d)
 
     args = ap.parse_args(argv)
@@ -161,7 +180,9 @@ def main(argv=None):
             if args.also_genome_index:
                 genome_backend = resolve_backend(bowtie_index=args.also_genome_index)
         results = [design_rna(t, backend=backend, screen=not args.no_screen,
-                              also_genome_backend=genome_backend) for t in targets]
+                              also_genome_backend=genome_backend,
+                              n_pairs=args.pairs, min_spacing=args.min_spacing)
+                   for t in targets]
         note = (f"mypibypy RNA design of {len(targets)} transcript target(s) from "
                 f"{resolve_loci_path(args.loci).name}. Screened against a "
                 f"transcriptome; see pipeline.RNA_SCREEN_POLICY.")
@@ -191,7 +212,8 @@ def main(argv=None):
         loci = load_loci(args.loci)
         warnings = _warn_if_example(args.loci)
         backend = _backend_from(args)
-        results = [design_locus(L, backend=backend, screen=not args.no_screen)
+        results = [design_locus(L, backend=backend, screen=not args.no_screen,
+                                n_pairs=args.pairs, min_spacing=args.min_spacing)
                    for L in loci]
         note = (f"mypibypy batch design of {len(loci)} locus/loci from "
                 f"{resolve_loci_path(args.loci).name}.")
@@ -203,12 +225,20 @@ def main(argv=None):
                       _parse_region(args.build, args.region), args.system)
         warnings = _warn_if_example()
         backend = _backend_from(args)
-        results = [design_locus(locus, backend=backend, screen=not args.no_screen)]
+        results = [design_locus(locus, backend=backend, screen=not args.no_screen,
+                                n_pairs=args.pairs, min_spacing=args.min_spacing)]
         note = f"mypibypy design: {locus.interval}."
 
     # An unscreened design must carry that fact into the workbook's provenance
     # note, not only into the specificity cell.
-    unscreened = [r.locus.name for r in results if not r.specificity.screened]
+    requested = getattr(args, "pairs", 1)
+    short = [f"{r.locus.name} ({r.n_pairs})" for r in results if r.n_pairs < requested]
+    if short:
+        warnings.append(
+            f"asked for {requested} pairs but the target only fits fewer at this "
+            f"spacing: {', '.join(short)}")
+    unscreened = [r.locus.name for r in results
+                  if not all(sc.screened for sc in r.pair_screens)]
     if unscreened:
         warnings.append(
             f"no genome-wide specificity screen was run for: {', '.join(unscreened)}")

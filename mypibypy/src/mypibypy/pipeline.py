@@ -19,6 +19,7 @@ from .accessibility import (
     site_accessibility,
 )
 from .design import (
+    DEFAULT_MIN_SPACING_NT,
     PADS_DIRECT,
     Candidate,
     ProbePair,
@@ -27,9 +28,12 @@ from .design import (
     build_fusion_pairs,
     build_pair,
     check_partner_specificity,
+    build_tiled_pairs,
     fusion_footprint,
     scan,
     scan_transcript,
+    select_tiled,
+    tiled_names,
 )
 from .loci import FusionJunction, Locus, RnaTarget
 from .sequence import fetch_sequence, fetch_transcript, mask_repeats, rmsk_hits
@@ -53,43 +57,102 @@ class DesignResult:
         default_factory=lambda: not_evaluated(
             "DNA target: the protocol denatures it, so target-site secondary "
             "structure does not gate binding"))
+    #: Every pair ordered for this locus, in genomic/transcript order. A
+    #: single-pair design leaves these empty and they fall back to the single
+    #: `pair`/`specificity`/`accessibility` above, so nothing that predates
+    #: tiling changes shape or output.
+    pairs: list[ProbePair] = field(default_factory=list)
+    pair_screens: list[SpecificityReport] = field(default_factory=list)
+    pair_accessibility: list[AccessibilityResult] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.pairs:
+            self.pairs = [self.pair]
+        if not self.pair_screens:
+            self.pair_screens = [self.specificity]
+        if not self.pair_accessibility:
+            self.pair_accessibility = [self.accessibility]
 
     @property
     def best(self) -> Candidate:
         return self.candidates[0]
 
+    @property
+    def n_pairs(self) -> int:
+        return len(self.pairs)
+
+    @property
+    def tiled(self) -> bool:
+        return len(self.pairs) > 1
+
+    def rows(self):
+        """(pair, screen, accessibility) per ordered pair, padded if need be.
+
+        The three lists are built together, but a caller constructing a result
+        by hand may supply only `pairs`; missing entries degrade to an explicit
+        not-screened / not-evaluated rather than silently reusing pair 1's.
+        """
+        for i, pair in enumerate(self.pairs):
+            screen = (self.pair_screens[i] if i < len(self.pair_screens)
+                      else not_screened("no screen recorded for this pair"))
+            access = (self.pair_accessibility[i] if i < len(self.pair_accessibility)
+                      else not_evaluated("no accessibility recorded for this pair"))
+            yield pair, screen, access
+
 
 def design_locus(locus: Locus, top: int = 5, backend: Backend | None = None,
-                 screen: bool = True, **screen_kwargs) -> DesignResult:
+                 screen: bool = True, n_pairs: int = 1,
+                 min_spacing: int = DEFAULT_MIN_SPACING_NT,
+                 **screen_kwargs) -> DesignResult:
     """Design one locus end to end.
 
     `screen=False` skips the genome screen outright; the result still carries a
     NOT_SCREENED report saying so, because "we chose not to screen" and "we
     screened and it was clean" must never render the same way.
+
+    `n_pairs` tiles multiple non-overlapping pairs across the locus. One pair at
+    ~100x amplification already works -- the lab's validated designs are all
+    single-pair -- so tiling is headroom for marginal signal, not a fix for a
+    defect. The published pi-FISH work used 35-50 probes per DNA locus per
+    channel, so there is a lot of headroom available. EVERY selected pair is
+    screened, not just the first: a second pair that lands on a repeat would
+    otherwise be ordered unchecked.
     """
     system = get_system(locus.system)
     seq = fetch_sequence(locus.interval)
     rmsk = rmsk_hits(locus.interval)
     # Soft-mask repeats so probe pads are never placed in repetitive DNA.
     masked = mask_repeats(seq, locus.interval, rmsk)
-    cands = scan(masked, locus.interval, top=top)
-    if not cands:
+    # Rank every window when tiling, so selection has somewhere to choose from;
+    # `candidates` is still trimmed to `top` for reporting, and its first entry
+    # is unchanged either way because the ranking is the same sort.
+    scan_top = top if n_pairs == 1 else max(top, len(masked))
+    ranked = scan(masked, locus.interval, top=scan_top)
+    if not ranked:
         raise ValueError(f"no valid repeat-free 51-nt window found in {locus.name}")
-    pair = build_pair(
-        locus.name, system, cands[0],
-        p1l_name=f"P1L_{locus.gene}_{locus.name}",
-        p1r_name=f"P1R_{locus.gene}_{locus.name}",
-    )
-    if screen:
-        spec = screen_pair(cands[0].left.seq, cands[0].right.seq, backend=backend,
-                           on_target=cands[0].interval, **screen_kwargs)
-    else:
-        spec = not_screened("genome screen skipped by request (screen=False)")
-    return DesignResult(locus, system, seq, cands, pair, rmsk, spec)
+    cands = ranked[:top]
+
+    selected = select_tiled(ranked, n_pairs, min_spacing)
+    pairs = build_tiled_pairs(locus.name, locus.gene, system, selected)
+
+    screens = []
+    for cand in selected:
+        if screen:
+            screens.append(screen_pair(cand.left.seq, cand.right.seq, backend=backend,
+                                       on_target=cand.interval, **screen_kwargs))
+        else:
+            screens.append(
+                not_screened("genome screen skipped by request (screen=False)"))
+    return DesignResult(locus, system, seq, cands, pairs[0], rmsk, screens[0],
+                        pairs=pairs, pair_screens=screens)
+
+
+class FusionIsSinglePair(ValueError):
+    """A junction is one position, so it cannot be tiled."""
 
 
 def design_fusion(junction: FusionJunction, backend=None, screen: bool = True,
-                  pad_assignment: str = PADS_DIRECT,
+                  pad_assignment: str = PADS_DIRECT, n_pairs: int = 1,
                   **screen_kwargs) -> list[DesignResult]:
     """Design a fusion junction: one sense result and one antisense result.
 
@@ -104,7 +167,26 @@ def design_fusion(junction: FusionJunction, backend=None, screen: bool = True,
     `specificity` asks, and exactly why a per-probe screen is useless for a
     junction. `check_partner_specificity` adds the complementary local check
     that neither pad is present in the *wrong* partner.
+
+    `n_pairs` above 1 is refused rather than quietly ignored. A fusion junction
+    is a single position: the design *is* the 1-nt gap sitting on the
+    breakpoint, and there is nowhere else to put a pair that would still be
+    junction-specific. A second pair would have to lie wholly inside one
+    partner, where it reports that partner unfused -- precisely what a fusion
+    probe exists to rule out. Tiling a junction is not a smaller version of
+    tiling a locus; it is a different and wrong design. (A junction does still
+    return two results, sense and antisense, which is a separate axis from
+    tiling.)
     """
+    if n_pairs != 1:
+        raise FusionIsSinglePair(
+            f"n_pairs={n_pairs} is not meaningful for a fusion junction: the gap "
+            f"must sit on the breakpoint, so there is exactly one junction-"
+            f"specific footprint. A second pair could only lie wholly inside one "
+            f"partner gene, where it would report that gene unfused. To raise "
+            f"signal here, tile the partner genes as ordinary loci instead -- "
+            f"knowing those pairs are not junction-specific."
+        )
     sense_system = get_system(junction.system)
     anti_system = get_system(junction.antisense_system)
     _, footprint = fusion_footprint(junction.sequence, junction.breakpoint,
@@ -182,11 +264,20 @@ def design_rna(target: RnaTarget, backend=None, screen: bool = True,
                accessibility_top: int = 25,
                accessibility_weight: float = DEFAULT_ACCESSIBILITY_WEIGHT,
                nucleation_nt: int = DEFAULT_NUCLEATION_NT,
+               n_pairs: int = 1, min_spacing: int = DEFAULT_MIN_SPACING_NT,
                **screen_kwargs) -> DesignResult:
     """Design a split-probe pair against a transcript.
 
     `backend` should index a TRANSCRIPTOME -- see `RNA_SCREEN_POLICY` for why,
     and for when to also pass `also_genome_backend`.
+
+    `n_pairs` tiles several non-overlapping pairs along the transcript. The
+    published guidance for RNA is roughly 10-15 pairs per transcript at medium
+    to low abundance and 1-5 for a highly abundant one, so the right count
+    depends on the target's expression and is left to the caller. Each pair is
+    screened and has its accessibility evaluated separately -- the whole point
+    of tiling an mRNA is that structure varies along it, so a shared number
+    would defeat the exercise.
 
     Target-site accessibility is evaluated for each candidate and folded into
     the ranking -- see `accessibility`. It never rejects a window, and when
@@ -227,30 +318,36 @@ def design_rna(target: RnaTarget, backend=None, screen: bool = True,
             key=lambda c: c.penalty + accessibility_penalty(
                 access[c.offset], weight=accessibility_weight),
         )
+    ranked = cands
     cands = cands[:top]
-    pair = build_pair(
-        target.name, system, cands[0],
-        p1l_name=f"P1L_{target.gene}_{target.name}",
-        p1r_name=f"P1R_{target.gene}_{target.name}",
-    )
+    selected = select_tiled(ranked, n_pairs, min_spacing)
+    pairs = build_tiled_pairs(target.name, target.gene, system, selected)
     locus = Locus(name=target.name, gene=target.gene,
                   description=(target.description
                                or f"RNA target on {target.accession}"),
-                  interval=cands[0].interval, system=system.name)
-    if screen:
-        spec = screen_pair(cands[0].left.seq, cands[0].right.seq, backend=backend,
-                           target_gene=target.gene, **screen_kwargs)
-        if also_genome_backend is not None:
-            genome = screen_pair(cands[0].left.seq, cands[0].right.seq,
-                                 backend=also_genome_backend, **screen_kwargs)
-            # Kept as a note rather than merged: the two screens answer different
-            # questions against different coordinate spaces, and averaging their
-            # verdicts would obscure both.
-            spec.reason = (spec.reason + " | additional genome screen: "
-                           + genome.summary()).strip(" |")
-    else:
-        spec = not_screened("genome screen skipped by request (screen=False)")
-    return DesignResult(locus, system, seq, cands, pair, rmsk=[], specificity=spec,
-                        accessibility=access.get(
-                            cands[0].offset,
-                            not_evaluated("accessibility check not requested")))
+                  interval=selected[0].interval, system=system.name)
+
+    screens, accesses = [], []
+    for cand in selected:
+        if screen:
+            spec = screen_pair(cand.left.seq, cand.right.seq, backend=backend,
+                               target_gene=target.gene, **screen_kwargs)
+            if also_genome_backend is not None:
+                genome = screen_pair(cand.left.seq, cand.right.seq,
+                                     backend=also_genome_backend, **screen_kwargs)
+                # Kept as a note rather than merged: the two screens answer
+                # different questions against different coordinate spaces, and
+                # averaging their verdicts would obscure both.
+                spec.reason = (spec.reason + " | additional genome screen: "
+                               + genome.summary()).strip(" |")
+        else:
+            spec = not_screened("genome screen skipped by request (screen=False)")
+        screens.append(spec)
+        # Already computed above for every ranked candidate when requested.
+        accesses.append(access.get(
+            cand.offset, not_evaluated("accessibility check not requested")))
+
+    return DesignResult(locus, system, seq, cands, pairs[0], rmsk=[],
+                        specificity=screens[0], accessibility=accesses[0],
+                        pairs=pairs, pair_screens=screens,
+                        pair_accessibility=accesses)
