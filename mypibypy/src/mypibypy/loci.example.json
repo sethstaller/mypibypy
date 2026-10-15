@@ -31,5 +31,27 @@
       "end": 142904500,
       "system": "cy3"
     }
+  ],
+  "_fusion_comment": [
+    "EXAMPLE FUSION JUNCTION -- entirely synthetic, generated at random.",
+    "It is NOT a real fusion and the sequence maps nowhere; it exists so that",
+    "fusion mode runs out of the box and the geometry can be inspected.",
+    "'breakpoint' is the 0-based index of the first base contributed by the 3'",
+    "partner, so sequence[:breakpoint] is 5'-partner sequence.",
+    "The sense and antisense pairs are put on different channels, which is how",
+    "the lab orders a junction: both strands, distinguishable in one image."
+  ],
+  "fusions": [
+    {
+      "name": "demo_junction",
+      "five_prime_gene": "SYNTHA",
+      "three_prime_gene": "SYNTHB",
+      "description": "synthetic demonstration junction (not a real fusion)",
+      "sequence": "TCATTGGCTATCCTAACCCGACCCTAGGAGCGGTTGGCGTGTATGCCGTGAATTTTCTCATTTCCGCTAGACATAATCGTTCTGCCTATATCTGGACAACATCCCGGCGACTTAGGCGACCCACAGAATCGTCCCTTCTAACGTAGTTCGCATAGTTCCCGTCCGTAGCCGGACTATTCGAACACCCAGTATTCGATTAACTCGGGCTTGACGTATTAGAGGCGTTAGTGTGCCAGGTAA",
+      "breakpoint": 120,
+      "system": "cy5",
+      "system_antisense": "cy3",
+      "gap_side": "five_prime"
+    }
   ]
 }

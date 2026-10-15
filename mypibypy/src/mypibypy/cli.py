@@ -17,8 +17,9 @@ from __future__ import annotations
 import argparse
 import re
 
-from .loci import Locus, is_example, load_loci, resolve_loci_path
-from .pipeline import design_locus
+from .design import PADS_AS_ORDERED, PADS_JUXTAPOSED
+from .loci import Locus, is_example, load_fusions, load_loci, resolve_loci_path
+from .pipeline import design_fusion, design_locus
 from .sequence import GenomicInterval
 from .specificity import SpecificityNotConfigured, resolve_backend
 from .systems import is_example as systems_are_example
@@ -97,6 +98,17 @@ def main(argv=None):
     b.add_argument("-o", "--out", required=True)
     _specificity_options(b)
 
+    f = sub.add_parser("fusion", help="design every fusion junction in a loci file")
+    f.add_argument("--loci", help="path to a loci JSON file with a 'fusions' key")
+    f.add_argument("-o", "--out", required=True)
+    f.add_argument("--pad-assignment", default=PADS_JUXTAPOSED,
+                   choices=[PADS_JUXTAPOSED, PADS_AS_ORDERED],
+                   help=f"{PADS_JUXTAPOSED} (default) puts both arms at the "
+                        f"breakpoint so P2 can bind; {PADS_AS_ORDERED} reproduces "
+                        f"the lab's hand-made antisense convention, whose arms "
+                        f"point away from the junction -- for audit only")
+    _specificity_options(f)
+
     d = sub.add_parser("design", help="design one locus given on the command line")
     d.add_argument("--build", required=True)
     d.add_argument("--region", required=True, help="chrom:start-end (1-based inclusive)")
@@ -108,7 +120,27 @@ def main(argv=None):
 
     args = ap.parse_args(argv)
 
-    if args.cmd == "batch":
+    if args.cmd == "fusion":
+        fusions = load_fusions(args.loci)
+        if not fusions:
+            raise SystemExit(
+                f"no fusions defined in {resolve_loci_path(args.loci)} "
+                "(add a 'fusions' key -- see loci.example.json)")
+        warnings = _warn_if_example(args.loci)
+        backend = _backend_from(args)
+        results = []
+        for j in fusions:
+            results += design_fusion(j, backend=backend, screen=not args.no_screen,
+                                     pad_assignment=args.pad_assignment)
+        if args.pad_assignment == PADS_AS_ORDERED:
+            warnings.append(
+                "built with the as-ordered antisense convention: the antisense "
+                "arms point away from the breakpoint and those pairs are not "
+                "expected to produce signal. Use for audit, not for ordering")
+        note = (f"mypibypy fusion design of {len(fusions)} junction(s) from "
+                f"{resolve_loci_path(args.loci).name}, "
+                f"pad assignment {args.pad_assignment}.")
+    elif args.cmd == "batch":
         loci = load_loci(args.loci)
         warnings = _warn_if_example(args.loci)
         backend = _backend_from(args)

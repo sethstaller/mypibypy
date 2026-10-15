@@ -10,8 +10,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .design import Candidate, ProbePair, build_pair, scan
-from .loci import Locus
+from .design import (
+    PADS_JUXTAPOSED,
+    Candidate,
+    ProbePair,
+    arms_are_juxtaposed,
+    build_fusion_pairs,
+    build_pair,
+    check_partner_specificity,
+    fusion_footprint,
+    scan,
+)
+from .loci import FusionJunction, Locus
 from .sequence import fetch_sequence, mask_repeats, rmsk_hits
 from .specificity import Backend, SpecificityReport, not_screened, screen_pair
 from .systems import AmplifierSystem, get_system
@@ -59,3 +69,60 @@ def design_locus(locus: Locus, top: int = 5, backend: Backend | None = None,
     else:
         spec = not_screened("genome screen skipped by request (screen=False)")
     return DesignResult(locus, system, seq, cands, pair, rmsk, spec)
+
+
+def design_fusion(junction: FusionJunction, backend=None, screen: bool = True,
+                  pad_assignment: str = PADS_JUXTAPOSED,
+                  **screen_kwargs) -> list[DesignResult]:
+    """Design a fusion junction: one sense result and one antisense result.
+
+    The junction has no coordinates in the reference, so there is no
+    RepeatMasker step -- `rmsk` is empty, and the workbook says 0 repeats
+    because none were looked for.
+
+    On what the genome screen means here: each pad is, by construction, a real
+    25-mer from its own parent gene, so single-half hits are guaranteed and
+    expected. They are not a defect. What matters is that no site anywhere has
+    *both* halves together -- which is exactly the pair-aware question
+    `specificity` asks, and exactly why a per-probe screen is useless for a
+    junction. `check_partner_specificity` adds the complementary local check
+    that neither pad is present in the *wrong* partner.
+    """
+    sense_system = get_system(junction.system)
+    anti_system = get_system(junction.antisense_system)
+    _, footprint = fusion_footprint(junction.sequence, junction.breakpoint,
+                                    junction.gap_side)
+    partner_problems = check_partner_specificity(
+        footprint, junction.five_prime_seq, junction.three_prime_seq)
+
+    pairs = build_fusion_pairs(
+        junction.name, junction.sequence, junction.breakpoint,
+        sense_system, anti_system, gap_side=junction.gap_side,
+        pad_assignment=pad_assignment,
+    )
+
+    results: list[DesignResult] = []
+    for pair in pairs:
+        cand = pair.candidate
+        strand = "antisense" if "antisense" in pair.p1l_name else "sense"
+        flags = list(cand.flags)
+        flags += [f"partner: {p}" for p in partner_problems]
+        if not arms_are_juxtaposed(pair, footprint):
+            flags.append("arms do not meet at the breakpoint -- P2 cannot bind, "
+                         "this pair should give no signal")
+        cand.flags = flags
+        locus = Locus(
+            name=f"{junction.name}_{strand}",
+            gene=f"{junction.five_prime_gene}::{junction.three_prime_gene}",
+            description=(junction.description
+                         or f"fusion junction, {strand} strand").strip(),
+            interval=cand.interval, system=pair.system.name,
+        )
+        if screen:
+            spec = screen_pair(cand.left.seq, cand.right.seq, backend=backend,
+                               **screen_kwargs)
+        else:
+            spec = not_screened("genome screen skipped by request (screen=False)")
+        results.append(DesignResult(locus, pair.system, junction.sequence,
+                                    [cand], pair, rmsk=[], specificity=spec))
+    return results

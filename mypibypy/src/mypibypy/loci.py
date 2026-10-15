@@ -14,6 +14,20 @@ Create your own from the shipped example:
 
     cp loci.example.json loci.local.json
 
+Fusion junctions live in the same file under a ``"fusions"`` key. A junction is
+not a genomic interval -- it is a sequence that exists only in the sample -- so
+it is supplied as sequence plus a breakpoint offset rather than coordinates:
+
+    {"fusions": [
+      {"name": "demo", "five_prime_gene": "GENEA", "three_prime_gene": "GENEB",
+       "sequence": "ACGT...", "breakpoint": 120,
+       "system": "cy5", "system_antisense": "cy3"}
+    ]}
+
+`breakpoint` is the 0-based index of the first base contributed by the 3'
+partner, so ``sequence[:breakpoint]`` is 5'-partner sequence. See
+`design.fusion_footprint` for how the 1-nt gap is placed on it.
+
 File format -- a list, or an object with a "loci" key holding one:
 
     {"loci": [
@@ -118,3 +132,87 @@ def load_loci(path: str | Path | None = None) -> list[Locus]:
 def is_example(path: str | Path | None = None) -> bool:
     """True when the loaded loci are the shipped demonstration region."""
     return resolve_loci_path(path).name == EXAMPLE_FILENAME
+
+
+# --- Fusion junctions ------------------------------------------------------
+
+@dataclass(frozen=True)
+class FusionJunction:
+    """A breakpoint, with enough partner sequence either side to probe it.
+
+    `sequence` is the fusion as supplied (transcript or genomic), and
+    `breakpoint` is the 0-based index of the first base from the 3' partner.
+    Fusions carry two systems because a junction is ordered as both strands --
+    the lab puts them on different channels so the strands can be told apart.
+    """
+
+    name: str
+    five_prime_gene: str
+    three_prime_gene: str
+    sequence: str
+    breakpoint: int
+    system: str                          # sense pair
+    system_antisense: str | None = None  # antisense pair; defaults to `system`
+    gap_side: str = "five_prime"
+    description: str = ""
+
+    @property
+    def five_prime_seq(self) -> str:
+        return self.sequence[: self.breakpoint]
+
+    @property
+    def three_prime_seq(self) -> str:
+        return self.sequence[self.breakpoint :]
+
+    @property
+    def antisense_system(self) -> str:
+        return self.system_antisense or self.system
+
+    def __str__(self) -> str:
+        return (f"{self.five_prime_gene}::{self.three_prime_gene} ({self.name}), "
+                f"breakpoint at {self.breakpoint} of {len(self.sequence)} nt")
+
+
+def _fusion_from_dict(d: dict, src: Path) -> FusionJunction:
+    required = {"name", "five_prime_gene", "three_prime_gene", "sequence",
+                "breakpoint", "system"}
+    missing = required - set(d)
+    if missing:
+        raise LociNotConfigured(
+            f"{src}: fusion {d.get('name', '?')!r} missing {sorted(missing)}")
+    seq = str(d["sequence"]).upper().replace(" ", "")
+    try:
+        bp = int(d["breakpoint"])
+    except (TypeError, ValueError) as exc:
+        raise LociNotConfigured(
+            f"{src}: fusion {d['name']!r} has a non-integer breakpoint") from exc
+    if not 0 < bp < len(seq):
+        raise LociNotConfigured(
+            f"{src}: fusion {d['name']!r} breakpoint {bp} is outside its "
+            f"{len(seq)} nt sequence")
+    bad = set(seq) - set("ACGTN")
+    if bad:
+        raise LociNotConfigured(
+            f"{src}: fusion {d['name']!r} sequence has non-DNA characters {sorted(bad)}")
+    return FusionJunction(
+        name=str(d["name"]), five_prime_gene=str(d["five_prime_gene"]),
+        three_prime_gene=str(d["three_prime_gene"]), sequence=seq, breakpoint=bp,
+        system=str(d["system"]), system_antisense=d.get("system_antisense"),
+        gap_side=str(d.get("gap_side", "five_prime")),
+        description=str(d.get("description", "")),
+    )
+
+
+def load_fusions(path: str | Path | None = None) -> list[FusionJunction]:
+    """Load fusion junctions. Returns [] when the file defines none."""
+    src = resolve_loci_path(path)
+    try:
+        raw = json.loads(src.read_text())
+    except json.JSONDecodeError as exc:
+        raise LociNotConfigured(f"{src} is not valid JSON: {exc}") from exc
+    entries = raw.get("fusions") if isinstance(raw, dict) else None
+    if not entries:
+        return []
+    if not isinstance(entries, list):
+        raise LociNotConfigured(f"{src}: 'fusions' must be a list")
+    return [_fusion_from_dict(d, src) for d in entries]

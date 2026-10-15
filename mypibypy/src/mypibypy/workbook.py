@@ -24,6 +24,27 @@ HDR_FILL = PatternFill("solid", fgColor="D9D9D9")
 WARN_FILL = PatternFill("solid", fgColor="FCE4D6")     # pale orange = unverified
 
 
+#: Characters Excel refuses in a worksheet title, plus its 31-char limit.
+_BAD_SHEET_CHARS = str.maketrans({c: "-" for c in ":\\/?*[]"})
+_SHEET_TITLE_MAX = 31
+
+
+def _sheet_title(wb, name: str) -> str:
+    """A worksheet title Excel will accept, unique within `wb`.
+
+    Fusion genes are written ``GENEA::GENEB`` and a colon is illegal in a sheet
+    title, so this is not hypothetical -- and a 31-character ceiling makes
+    collisions between long names likely enough to handle.
+    """
+    base = (name.translate(_BAD_SHEET_CHARS).strip() or "sheet")[:_SHEET_TITLE_MAX]
+    title, n = base, 2
+    while title in wb.sheetnames:
+        suffix = f"_{n}"
+        title = base[: _SHEET_TITLE_MAX - len(suffix)] + suffix
+        n += 1
+    return title
+
+
 def _specificity_text(rep) -> str:
     """One cell describing the genome screen, including it not having happened.
 
@@ -191,7 +212,7 @@ def _part_row(ws, r, name, seq, status, channel, fill):
 
 def _locus_sheet(wb, res):
     L, c, p, s = res.locus, res.best, res.pair, res.system
-    ws = wb.create_sheet(f"{L.gene}_{L.name}")
+    ws = wb.create_sheet(_sheet_title(wb, f"{L.gene}_{L.name}"))
     ws.column_dimensions["A"].width = 24
     ws.column_dimensions["B"].width = 80
     def kv(r, k, v, mono=False):
