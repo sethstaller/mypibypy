@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# pytest
+.pytest_cache/
+
+# Generated analysis artifacts (regenerate with the scripts that produce them)
+*.pkl
+
+# Large reference data: genome FASTAs and aligner indices are downloaded, never committed
+*.fa
+*.fa.gz
+*.fai
+*.bt2
+*.bt2l
+*.ebwt
+*.nin
+*.nhr
+*.nsq
+*.ndb
+genome/
+
+# macOS
+.DS_Store
+
+# Lab-specific amplifier sequences -- never commit (see src/mypibypy/systems.py)
+systems.local.json
+
+# Experiment-specific target loci (see src/mypibypy/loci.py)
+loci.local.json
+
+# Design data: order workbooks contain probe sequences and target/fusion designs
+*.xlsx
+designs/
+
+# Abandoned prototype
+pifish-agent/
+
+# Editor settings: contain machine-specific interpreter paths
+.vscode/
+
+# Output of the NCBI web BLAST step (never returned usable results)
+blast_*.txt

@@ -1,0 +1,35 @@
+{
+  "_comment": [
+    "EXAMPLE TARGET LOCI -- replace with your own.",
+    "The mouse Actb locus (mm10 chr5:142,903,115-142,906,754, minus strand;",
+    "RefSeq NM_007393.5). Chosen because it is a standard, published positive",
+    "control: Tao et al., Nat Commun 14:443 (2023) used 35 pi target probes",
+    "against the Actb genomic locus. Coordinates verified against the UCSC",
+    "mm10 ncbiRefSeqCurated track.",
+    "Copy this file to loci.local.json and edit it; loci.local.json is",
+    "gitignored, so experiment-specific targets stay out of version control.",
+    "start/end are 1-based inclusive, as in UCSC and GenomicInterval."
+  ],
+  "loci": [
+    {
+      "name": "promoter",
+      "gene": "Actb",
+      "description": "Actb promoter-proximal region (positive control)",
+      "build": "mm10",
+      "chrom": "chr5",
+      "start": 142906255,
+      "end": 142906754,
+      "system": "cy5"
+    },
+    {
+      "name": "gene_body",
+      "gene": "Actb",
+      "description": "Actb gene body (positive control, second channel)",
+      "build": "mm10",
+      "chrom": "chr5",
+      "start": 142904000,
+      "end": 142904500,
+      "system": "cy3"
+    }
+  ]
+}
