@@ -3,9 +3,20 @@
 Design split-probe (P1L/P1R) primary probes for piFISH targets and emit an order
 workbook that drops into an existing validated P2/P3/P4 amplifier pool.
 """
-from .design import Candidate, ProbePair, build_pair, scan
-from .loci import Locus, load_loci
+from .design import (
+    Candidate,
+    ProbePair,
+    arms_are_juxtaposed,
+    build_fusion_pairs,
+    build_pair,
+    check_partner_specificity,
+    fusion_footprint,
+    scan,
+)
+from .loci import FusionJunction, Locus, load_fusions, load_loci
+from .outcomes import DesignFacts, ImagingResult, OutcomeStore
 from .sequence import GenomicInterval, fetch_sequence, revcomp
+from .specificity import SpecificityReport, resolve_backend, screen_pair
 from .systems import AmplifierSystem, get_system, is_example, loaded_from, systems
 
 __version__ = "0.1.0"
@@ -15,8 +26,11 @@ __version__ = "0.1.0"
 # before any systems are configured. Reach them via `systems()` or
 # `get_system("cy5")`, or as lazy attributes of `mypibypy.systems`.
 __all__ = [
-    "AmplifierSystem", "Candidate", "GenomicInterval", "Locus", "ProbePair",
-    "build_pair", "fetch_sequence", "get_system", "is_example", "load_loci",
-    "loaded_from",
-    "revcomp", "scan", "systems",
+    "AmplifierSystem", "Candidate", "DesignFacts", "FusionJunction",
+    "GenomicInterval", "ImagingResult", "Locus", "OutcomeStore", "ProbePair",
+    "SpecificityReport",
+    "arms_are_juxtaposed", "build_fusion_pairs", "build_pair",
+    "check_partner_specificity", "fetch_sequence", "fusion_footprint",
+    "get_system", "is_example", "load_fusions", "load_loci", "loaded_from",
+    "resolve_backend", "revcomp", "scan", "screen_pair", "systems",
 ]

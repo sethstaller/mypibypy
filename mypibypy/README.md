@@ -74,7 +74,7 @@ pip install -e .          # from this directory
 Then configure your amplifier systems (see below) and run the tests:
 
 ```bash
-pytest                    # 41 tests, no PYTHONPATH needed
+pytest                    # 150 tests, no PYTHONPATH needed
 ```
 
 ## Usage
@@ -86,6 +86,13 @@ python -m mypibypy batch --loci loci.local.json -o order.xlsx
 # one locus straight from the command line
 python -m mypibypy design --build mm10 --region chr5:142906255-142906754 \
     --system cy5 --gene Actb --name promoter -o order.xlsx
+
+# fusion junctions: sense + antisense pairs, gap placed on the breakpoint
+python -m mypibypy fusion --loci loci.local.json -o fusion_order.xlsx
+
+# with a genome screen (otherwise the workbook says no screen was run)
+python -m mypibypy batch --loci loci.local.json -o order.xlsx \
+    --bowtie-index /data/genomes/mm10
 ```
 
 ```python
@@ -121,18 +128,81 @@ example systems or example loci are in use -- those outputs are not orderable.
 | `design.py`      | 51-nt window scan/scoring + P1L/P1R construction                 |
 | `loci.py`        | target loci loaded from JSON (`Locus`, `load_loci`)              |
 | `pipeline.py`    | locus → fetch → scan → chosen pair                               |
-| `specificity.py` | genome-wide screening (NCBI web BLAST; being replaced by a local aligner) |
+| `specificity.py` | pair-aware genome screening via local bowtie v1 / blastn         |
 | `crosshyb.py`    | cross-hybridization against the amplifier pool and the order     |
 | `thermo.py`      | buffer-aware Tm and wash-survival margins                        |
+| `outcomes.py`    | design → imaging-result record, for calibrating thresholds later |
 | `workbook.py`    | render the order workbook (ORDER_ssDNA / Parts list / per-locus) |
 | `cli.py`         | `python -m mypibypy`                                             |
 
-## QC / specificity
+## QC and specificity
 
 Window scoring balances GC (per-pad and matched between pads), matched Tm, and
 rejects homopolymer / low-complexity runs. RepeatMasker overlap is reported.
-Genome-wide BLAT/BLAST is the recommended final check (`specificity.py` provides
-an NCBI fallback since UCSC web BLAT now requires a captcha).
+
+### Pair-aware genome screening
+
+A piFISH pair only makes a spot when **both** halves bind adjacent target, so a
+genome hit for one half is not an off-target. `specificity.py` screens each half
+separately and then joins the hits: a site is reported only where both halves
+land on the same chromosome within a window, on the same strand and in an order
+that could actually rebuild P2's landing site. A lone-half hit lowers the score
+rather than rejecting the pair. Each site is then passed through `thermo` to turn
+"the aligner found it" into "it would still be bound after the washes".
+
+Point it at a local database:
+
+```bash
+export MYPIBYPY_BOWTIE_INDEX=/data/genomes/mm10     # bowtie v1 index basename
+export MYPIBYPY_BLAST_DB=/data/genomes/mm10         # or a makeblastdb basename
+```
+
+With neither set, the screen returns a `NOT_SCREENED` status with a reason, and
+the workbook prints that verbatim. **A screen that did not run never renders as
+a screen that passed** — check `SpecificityReport.screened` before making any
+specificity claim.
+
+Backends are measured, not assumed — rerun
+`scripts/benchmark_specificity.py`, which plants sites with known mismatch
+counts at known coordinates and counts recovery (40 × 25-nt queries per cell):
+
+| backend | 0mm | 1mm | 2mm | 3mm | 4mm | hits kept |
+|---|---|---|---|---|---|---|
+| `bowtie -v 3 -a` | 40/40 | 40/40 | 40/40 | 40/40 | 0/40 | 160 |
+| `blastn-short -word_size 5` | 40/40 | 40/40 | 40/40 | 40/40 | 18/40 | 1316 |
+| `blastn-short -word_size 7` | 40/40 | 40/40 | 40/40 | 39/40 | 16/40 | 765 |
+| `blastn-short -word_size 11` | 40/40 | 40/40 | 27/40 | 14/40 | 5/40 | 151 |
+| `bowtie2 --very-sensitive-local` | 40/40 | 0/40 | 0/40 | 0/40 | 0/40 | 40 |
+
+bowtie v1 is preferred: `-v 3 -a` is exhaustive within its budget and returns
+only the planted sites. `bowtie2 --very-sensitive-local`, the obvious first
+choice, is unusable at 25 nt — a single mismatch often leaves no seed — and is
+kept only as a baseline. blastn needs `-dust no`, since DUST masks short queries
+into silence, which looks exactly like a clean result.
+
+## Fusion junctions
+
+`mypibypy fusion` places the 1-nt gap **on the breakpoint**, so the left pad lies
+wholly in the 5' partner and the right pad wholly in the 3' partner, and neither
+parent gene alone can bring both halves together. `check_partner_specificity`
+enforces that each pad is present in its own partner and absent from the other
+(both strands). Sense and antisense pairs are emitted together, on two channels.
+
+`design.arms_are_juxtaposed` answers the question no per-probe check can: do the
+two constant arms actually meet at the gap, so P2's landing site can form? A pair
+with its pads on the wrong arms has the right lengths, the right arms and the
+right pads, and still cannot signal — its arms point at the footprint's outer
+edges instead of at the junction.
+
+## Recording what happened
+
+`outcomes.py` keeps an append-only JSONL record linking each ordered pair
+(sequences, locus, system, design-time QC, screen verdicts) to its imaging result
+from [zFISHer](https://github.com/sstaller-sj/zFISHer), read from that project's
+`reports/<layer>_puncta.csv`. It computes no score and fits no threshold: with
+three designs there is nothing to fit, and this exists so the comparison becomes
+possible later. The store holds real sequences, so it is gitignored
+(`outcomes.local.jsonl`).
 
 ## Credit and license
 

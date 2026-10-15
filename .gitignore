@@ -39,11 +39,18 @@ loci.local.json
 *.xlsx
 designs/
 
+# Design-to-result records: contain real probe sequences (see src/mypibypy/outcomes.py)
+outcomes.local.jsonl
+*.local.jsonl
+
+# Decoy databases built by scripts/benchmark_specificity.py
+decoy_bench/
+
 # Abandoned prototype
 pifish-agent/
 
 # Editor settings: contain machine-specific interpreter paths
 .vscode/
 
-# Output of the NCBI web BLAST step (never returned usable results)
+# Output of the removed NCBI web BLAST step (it never returned usable results)
 blast_*.txt
