@@ -11,8 +11,11 @@ requires-python = ">=3.10"
 dependencies = ["openpyxl>=3.1"]
 
 [project.optional-dependencies]
-# Pure-Python test suite; the external aligners (blast, bowtie, bowtie2) are not
-# pip-installable -- see README for the conda environment.
+# Pure-Python test suite. The external tools -- the aligners (blast, bowtie,
+# bowtie2) and ViennaRNA (RNAplfold, for RNA target-site accessibility) -- are
+# not pip-installable; see README for the conda environment. Every one of them
+# is optional at runtime: the features that use them report an explicit
+# not-screened / not-evaluated status when they are absent.
 dev = ["pytest>=8"]
 
 [project.scripts]

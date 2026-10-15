@@ -20,7 +20,7 @@ its specificity, and it is what this tool designs and checks against.
 
 ```bash
 conda create -n pifish-tools -c conda-forge -c bioconda \
-    python=3.11 blast bowtie bowtie2 samtools openpyxl pytest
+    python=3.11 blast bowtie bowtie2 samtools viennarna openpyxl pytest
 conda activate pifish-tools
 cd mypibypy && pip install -e . && pytest
 ```
@@ -38,7 +38,7 @@ python -m mypibypy rna    --loci loci.local.json -o rna_order.xlsx \
 |---|---|
 | [`mypibypy/`](mypibypy/) | the package, its tests, and [the real README](mypibypy/README.md) |
 | [`mypibypy/src/mypibypy/`](mypibypy/src/mypibypy/) | design, screening and workbook modules |
-| [`mypibypy/tests/`](mypibypy/tests/) | 217 tests; aligner- and network-backed ones skip when unavailable |
+| [`mypibypy/tests/`](mypibypy/tests/) | 245 tests; aligner-, folding- and network-backed ones skip when unavailable |
 | [`mypibypy/scripts/`](mypibypy/scripts/) | threshold calibration and backend sensitivity benchmarks |
 
 ## No sequences in this repository

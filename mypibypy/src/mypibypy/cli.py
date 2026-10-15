@@ -55,6 +55,8 @@ def _report(results):
         print(f"  {p.p1l_name}: {p.p1l}")
         print(f"  {p.p1r_name}: {p.p1r}")
         print(f"  specificity: {res.specificity.summary()}")
+        if res.accessibility.evaluated:
+            print(f"  accessibility: {res.accessibility.summary()}")
 
 
 def _specificity_options(ap):

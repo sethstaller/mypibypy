@@ -8,8 +8,16 @@ field. Consumers that make specificity claims (the order workbook) read
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from .accessibility import (
+    DEFAULT_ACCESSIBILITY_WEIGHT,
+    DEFAULT_NUCLEATION_NT,
+    AccessibilityResult,
+    accessibility_penalty,
+    not_evaluated,
+    site_accessibility,
+)
 from .design import (
     PADS_DIRECT,
     Candidate,
@@ -38,6 +46,13 @@ class DesignResult:
     pair: ProbePair
     rmsk: list[dict]
     specificity: SpecificityReport
+    #: Target-site accessibility. Only meaningful for RNA: a DNA target is
+    #: denatured by the protocol, so the question does not arise there, and a
+    #: genomic design carries an explicit "not applicable" rather than a number.
+    accessibility: AccessibilityResult = field(
+        default_factory=lambda: not_evaluated(
+            "DNA target: the protocol denatures it, so target-site secondary "
+            "structure does not gate binding"))
 
     @property
     def best(self) -> Candidate:
@@ -163,11 +178,20 @@ RNA_SCREEN_POLICY = "transcriptome-only by default; see RNA_SCREEN_POLICY"
 
 def design_rna(target: RnaTarget, backend=None, screen: bool = True,
                top: int = 5, transcript_seq: str | None = None,
-               also_genome_backend=None, **screen_kwargs) -> DesignResult:
+               also_genome_backend=None, check_accessibility: bool = True,
+               accessibility_top: int = 25,
+               accessibility_weight: float = DEFAULT_ACCESSIBILITY_WEIGHT,
+               nucleation_nt: int = DEFAULT_NUCLEATION_NT,
+               **screen_kwargs) -> DesignResult:
     """Design a split-probe pair against a transcript.
 
     `backend` should index a TRANSCRIPTOME -- see `RNA_SCREEN_POLICY` for why,
     and for when to also pass `also_genome_backend`.
+
+    Target-site accessibility is evaluated for each candidate and folded into
+    the ranking -- see `accessibility`. It never rejects a window, and when
+    RNAplfold is absent every candidate scores 0 for it, so the ordering is
+    exactly what it was before accessibility existed.
 
     The screen is given `target_gene`, so the probe's own gene is excluded
     instead of being reported as an off-target in each of its isoforms. Note the
@@ -179,11 +203,31 @@ def design_rna(target: RnaTarget, backend=None, screen: bool = True,
     system = get_system(target.system)
     seq = transcript_seq if transcript_seq is not None else fetch_transcript(
         target.accession)
-    cands = scan_transcript(seq, target.accession, top=top,
+    # Scan wider than requested so accessibility has candidates to choose
+    # between: the most accessible window is often not the best-scoring one on
+    # GC and Tm alone, and re-ranking a list of one achieves nothing.
+    cands = scan_transcript(seq, target.accession, top=max(top, accessibility_top),
                             scan_start=target.scan_start, scan_end=target.scan_end,
                             exon_boundaries=target.exon_boundaries)
     if not cands:
         raise ValueError(f"no valid 51-nt window found in {target.accession}")
+
+    # Accessibility is RNA-only and is applied HERE, not in `design._score`.
+    # That keeps `_score` byte-comparable with every design made before this
+    # existed -- adding a term there would retroactively reorder genomic
+    # designs that have already been ordered. See accessibility.py on why any
+    # threshold is uncalibrated; this is a ranking input, never a reject.
+    access: dict[int, AccessibilityResult] = {}
+    if check_accessibility:
+        for cand in cands:
+            access[cand.offset] = site_accessibility(
+                seq, cand.offset, nucleation_nt=nucleation_nt)
+        cands = sorted(
+            cands,
+            key=lambda c: c.penalty + accessibility_penalty(
+                access[c.offset], weight=accessibility_weight),
+        )
+    cands = cands[:top]
     pair = build_pair(
         target.name, system, cands[0],
         p1l_name=f"P1L_{target.gene}_{target.name}",
@@ -206,4 +250,7 @@ def design_rna(target: RnaTarget, backend=None, screen: bool = True,
                            + genome.summary()).strip(" |")
     else:
         spec = not_screened("genome screen skipped by request (screen=False)")
-    return DesignResult(locus, system, seq, cands, pair, rmsk=[], specificity=spec)
+    return DesignResult(locus, system, seq, cands, pair, rmsk=[], specificity=spec,
+                        accessibility=access.get(
+                            cands[0].offset,
+                            not_evaluated("accessibility check not requested")))

@@ -70,6 +70,27 @@ def _specificity_text(rep) -> str:
     return text
 
 
+def _accessibility_text(res) -> str:
+    """One cell for target-site accessibility, including it not being applicable.
+
+    Same rule as the specificity cell: a number that was never computed must not
+    render as a good one. The uncalibrated caveat travels with the number,
+    because a reader looking at an order sheet is exactly who might otherwise
+    treat it as a threshold.
+    """
+    if not res.evaluated:
+        return f"NOT EVALUATED -- {res.reason}"
+    limiting = res.limiting_pad
+    return (
+        f"{limiting.label.upper()} -- limiting pad is the {limiting.pad} at "
+        f"P={res.pair_nucleation_p:.3f} for a {res.nucleation_nt}-nt unpaired run "
+        f"(left {res.left.best_nucleation_p:.3f} / right "
+        f"{res.right.best_nucleation_p:.3f}; mean per-base unpaired "
+        f"{res.left.mean_unpaired:.2f} / {res.right.mean_unpaired:.2f}). "
+        f"{res.tool}. {res.caveat}"
+    )
+
+
 def _hdr(ws, row, values, widths=None):
     for j, v in enumerate(values, 1):
         c = ws.cell(row=row, column=j, value=v)
@@ -154,7 +175,25 @@ def _notes_sheet(wb, results, source_note):
         if not res.specificity.screened or res.specificity.verdict == "fail":
             cell.fill = WARN_FILL
         r += 1
-    r += 1
+    if any(res.accessibility.evaluated for res in results):
+        ws.cell(row=r, column=1, value="Accessibility").font = H
+        ws.cell(row=r, column=2, value=(
+            "Target-site secondary structure on the transcript (RNA targets "
+            "only; DNA targets are denatured by the protocol). Per locus below."
+        )).font = B
+        ws.cell(row=r, column=2).alignment = Alignment(wrap_text=True, vertical="top")
+        r += 1
+        for res in results:
+            L = res.locus
+            ws.cell(row=r, column=1, value=f"  {L.gene} {L.name}").font = B
+            cell = ws.cell(row=r, column=2, value=_accessibility_text(res.accessibility))
+            cell.font = B
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+            if res.accessibility.evaluated and res.accessibility.pair_nucleation_p < 0.2:
+                cell.fill = WARN_FILL
+            r += 1
+        r += 1
+
     ws.cell(row=r, column=1, value="Source/provenance").font = H
     ws.cell(row=r, column=2, value=source_note).font = B
     ws.cell(row=r, column=2).alignment = Alignment(wrap_text=True, vertical="top")
@@ -232,9 +271,10 @@ def _locus_sheet(wb, res):
     kv(11, "right GC / Tm", f"{c.right.gc*100:.0f}% / {c.right.tm:.1f} C")
     kv(12, "QC flags", ", ".join(c.flags) or "none")
     kv(13, "Genome screen", _specificity_text(res.specificity))
-    kv(15, p.p1l_name, p.p1l, mono=True)
-    kv(16, p.p1r_name, p.p1r, mono=True)
-    kv(18, "Region sequence (plus, 5'->3')", res.region_seq, mono=True)
+    kv(14, "Target-site accessibility", _accessibility_text(res.accessibility))
+    kv(16, p.p1l_name, p.p1l, mono=True)
+    kv(17, p.p1r_name, p.p1r, mono=True)
+    kv(19, "Region sequence (plus, 5'->3')", res.region_seq, mono=True)
     return ws
 
 

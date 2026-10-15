@@ -66,7 +66,7 @@ and bowtie, which are not pip-installable. Create the environment with conda:
 
 ```bash
 conda create -n pifish-tools -c conda-forge -c bioconda \
-    python=3.11 blast bowtie bowtie2 samtools openpyxl pytest
+    python=3.11 blast bowtie bowtie2 samtools viennarna openpyxl pytest
 conda activate pifish-tools
 pip install -e .          # from this directory
 ```
@@ -74,7 +74,7 @@ pip install -e .          # from this directory
 Then configure your amplifier systems (see below) and run the tests:
 
 ```bash
-pytest                    # 217 tests, no PYTHONPATH needed
+pytest                    # 245 tests, no PYTHONPATH needed
 ```
 
 ## Usage
@@ -131,6 +131,7 @@ example systems or example loci are in use -- those outputs are not orderable.
 | `specificity.py` | pair-aware genome screening via local bowtie v1 / blastn         |
 | `crosshyb.py`    | cross-hybridization against the amplifier pool and the order     |
 | `thermo.py`      | buffer-aware Tm and wash-survival margins                        |
+| `accessibility.py` | RNA target-site secondary structure (RNAplfold)                |
 | `outcomes.py`    | design → imaging-result record, for calibrating thresholds later |
 | `workbook.py`    | render the order workbook (ORDER_ssDNA / Parts list / per-locus) |
 | `cli.py`         | `python -m mypibypy`                                             |
@@ -279,9 +280,43 @@ are used only to *report* that a footprint spans a junction, and where —
 `junction_position` distinguishes a boundary landing on the 1-nt gap, where each
 pad lies wholly within one exon, from one landing mid-pad.
 
-Not yet addressed: mRNA secondary-structure accessibility, a genuinely RNA-only
-constraint. ViennaRNA is not in the conda environment and adding it was kept out
-of this work deliberately.
+### Target-site accessibility
+
+A probe can be perfectly specific and still never bind, because its site is
+folded into a stem. This failure mode does not exist for DNA targets, which the
+protocol denatures. `accessibility.py` scores the **target site on the
+transcript** in the context of its flanks — not the folding of the probe oligo,
+which is a different question.
+
+The metric is the probability of an unpaired run long enough to nucleate
+(default 8 nt), not the mean per-base unpaired probability. That choice is
+measured, not stylistic — on a synthetic hairpin:
+
+| region | P(base unpaired) | P(8-nt run unpaired) |
+|---|---|---|
+| open flank | 0.95 | 0.86 |
+| stem | 0.28 | 0.046 |
+| hairpin loop | 0.89 | **0.008** |
+
+A mean would call that loop accessible; a probe cannot nucleate in it.
+
+- The two pads are scored **separately** and the pair takes the **worse** of
+  them, never the average — both halves must bind, so one buried pad kills the
+  design however open the other is.
+- Folded with `RNAplfold -W 80 -L 40` and 150 nt of flanking transcript either
+  side. 150 is comfortably more than both `W` and `L`: every footprint base sees
+  a full window, and nothing beyond `L` can pair with it at all. Where a site
+  sits near a transcript end, the flank actually available is reported rather
+  than padded over.
+- It is a **ranking input and a reported attribute, never a hard reject**, and
+  it does not override gross GC or Tm problems. Applied in the RNA path only, so
+  `design._score` stays comparable with designs already ordered — installing
+  ViennaRNA is the only thing that changes an ordering.
+- **No calibrated threshold exists.** Nothing ties a piFISH failure to a measured
+  accessibility, and the caveat travels with every number into the workbook.
+
+Needs ViennaRNA (`conda install -c conda-forge -c bioconda viennarna`). Without
+it, results are `NOT_EVALUATED` with a reason and contribute zero to ranking.
 
 ### Behind a TLS-inspecting proxy
 
