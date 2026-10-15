@@ -24,6 +24,7 @@ from mypibypy import thermo
 from mypibypy.sequence import GenomicInterval, revcomp
 from mypibypy.specificity import (
     DEFAULT_MIN_ALIGNED_NT,
+    DEFAULT_SIGNAL_GAP_NT,
     ERROR,
     NOT_SCREENED,
     SCREENED,
@@ -127,32 +128,32 @@ class TestPairingGeometry:
     """Both halves bind the plus strand with a 1-nt gap. Off-target sites must
     reproduce that geometry to make a spot."""
 
-    def test_designed_geometry_is_juxtaposed(self):
+    def test_designed_geometry_is_signal_capable(self):
         left = hit("left", start=1000)              # 1000-1024
         right = hit("right", start=1026)            # 1-nt gap at 1025
         (site,) = pair_hits([left], [right], LEFT, RIGHT)
         assert site.gap_nt == 1
-        assert site.same_strand and site.correct_order and site.juxtaposed
+        assert site.same_strand and site.correct_order and site.signal_capable
 
     def test_minus_strand_site_is_recognised_with_order_reversed(self):
         # On a reverse-complemented copy of the target, right25 precedes left25.
         right = hit("right", start=1000, strand="-")
         left = hit("left", start=1026, strand="-")
         (site,) = pair_hits([left], [right], LEFT, RIGHT)
-        assert site.gap_nt == 1 and site.correct_order and site.juxtaposed
+        assert site.gap_nt == 1 and site.correct_order and site.signal_capable
 
-    def test_wrong_order_is_reported_but_not_juxtaposed(self):
+    def test_wrong_order_is_reported_but_cannot_signal(self):
         right = hit("right", start=1000)
         left = hit("left", start=1026)
         (site,) = pair_hits([left], [right], LEFT, RIGHT)
         assert site.same_strand and not site.correct_order
-        assert not site.juxtaposed, "reversed halves cannot rebuild the P2 site"
+        assert not site.signal_capable, "reversed halves cannot rebuild the P2 site"
 
-    def test_opposite_strands_cannot_be_juxtaposed(self):
+    def test_opposite_strands_cannot_signal(self):
         left = hit("left", start=1000, strand="+")
         right = hit("right", start=1026, strand="-")
         (site,) = pair_hits([left], [right], LEFT, RIGHT)
-        assert not site.same_strand and not site.juxtaposed
+        assert not site.same_strand and not site.signal_capable
 
     def test_different_chromosomes_never_pair(self):
         assert pair_hits([hit("left", chrom="chr1")],
@@ -164,19 +165,45 @@ class TestPairingGeometry:
         assert pair_hits([left], [far], LEFT, RIGHT, window_nt=200) == []
         assert len(pair_hits([left], [far], LEFT, RIGHT, window_nt=10000)) == 1
 
-    def test_inside_the_window_pairs_but_is_only_co_localized(self):
+    def test_inside_the_window_but_too_far_apart_is_only_co_localized(self):
         left = hit("left", start=1000)
         right = hit("right", start=1150)
         (site,) = pair_hits([left], [right], LEFT, RIGHT, window_nt=200)
         assert site.gap_nt == 125
-        assert not site.juxtaposed, "125 nt apart cannot bridge a 29-nt P2 site"
+        assert not site.signal_capable, "125 nt is past even the flexible-arm reach"
 
-    def test_juxtaposed_window_is_configurable(self):
+    def test_the_signal_window_is_configurable(self):
         left = hit("left", start=1000)
         right = hit("right", start=1050)   # 25 nt gap
-        (loose,) = pair_hits([left], [right], LEFT, RIGHT, juxtaposed_gap_nt=30)
-        (tight,) = pair_hits([left], [right], LEFT, RIGHT, juxtaposed_gap_nt=10)
-        assert loose.juxtaposed and not tight.juxtaposed
+        (loose,) = pair_hits([left], [right], LEFT, RIGHT, signal_gap_nt=30)
+        (tight,) = pair_hits([left], [right], LEFT, RIGHT, signal_gap_nt=10)
+        assert loose.signal_capable and not tight.signal_capable
+
+    def test_arms_bridge_tens_of_nt_so_a_40_nt_gap_still_signals(self):
+        """The corrected threshold, and the reason for it.
+
+        A 10-nt window was originally used here. The lab's own hand-made
+        antisense fusion pairs anchor their arms 50 nt apart and give signal at
+        the bench, so an off-target pair tens of nt apart is signal-capable too.
+        Under the old window this site came back merely "co-localized" -- the
+        unsafe direction for a specificity screen.
+        """
+        left = hit("left", start=1000)
+        right = hit("right", start=1065)   # 40 nt between the footprints
+        (site,) = pair_hits([left], [right], LEFT, RIGHT)
+        assert site.gap_nt == 40
+        assert site.signal_capable, (
+            f"a 40-nt gap must be treated as signal-capable; "
+            f"DEFAULT_SIGNAL_GAP_NT={DEFAULT_SIGNAL_GAP_NT}")
+        assert not pair_hits([left], [right], LEFT, RIGHT,
+                             signal_gap_nt=10)[0].signal_capable
+
+    def test_the_default_window_is_at_least_the_bench_observed_separation(self):
+        """A designed pair is known to work with its arms 50 nt apart, so the
+        screen must not call anything inside that merely co-localized."""
+        assert DEFAULT_SIGNAL_GAP_NT >= 50, (
+            "lowering this below the separation a working design already uses "
+            "would hide genuinely signal-capable off-target pairs")
 
 
 class TestThermoTriage:
@@ -191,7 +218,7 @@ class TestThermoTriage:
         left = hit("left", start=1000, mismatches=3)
         right = hit("right", start=1026, mismatches=3)
         (site,) = pair_hits([left], [right], LEFT, RIGHT)
-        assert site.juxtaposed, "geometry is still right"
+        assert site.signal_capable, "geometry is still right"
         assert not site.survives_wash, "but it comes apart in the wash"
         assert site.min_margin_c < 0
 
@@ -317,7 +344,7 @@ class TestPairAwarenessIsReal:
         fasta = _decoy(tmp_path, {4000: LEFT + "T" + RIGHT})
         rep = screen_pair(LEFT, RIGHT, backend=backend_factory(tmp_path, fasta))
         assert rep.screened
-        sites = [s for s in rep.pair_sites if s.juxtaposed]
+        sites = [s for s in rep.pair_sites if s.signal_capable]
         assert sites, f"a duplicated footprint must be found: {rep.summary()}"
         assert sites[0].gap_nt == 1
         assert sites[0].survives_wash
@@ -345,7 +372,7 @@ class TestPairAwarenessIsReal:
         fasta = _decoy(tmp_path, {4000: revcomp(LEFT + "T" + RIGHT)})
         rep = screen_pair(LEFT, RIGHT, backend=backend_factory(tmp_path, fasta))
         assert rep.screened
-        sites = [s for s in rep.pair_sites if s.juxtaposed]
+        sites = [s for s in rep.pair_sites if s.signal_capable]
         assert sites, f"minus-strand copy missed: {rep.summary()}"
         assert sites[0].left.strand == sites[0].right.strand == "-"
 

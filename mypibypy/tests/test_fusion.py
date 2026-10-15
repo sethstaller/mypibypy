@@ -10,10 +10,14 @@ That workbook is gitignored and its sequences never enter this file, the
 repository, or an assertion message -- the test reports positions and lengths,
 never bases.
 
-`TestArmGeometry` is the one to read. A fusion pair with its two pads on the
-wrong arms is indistinguishable from a good one by length, composition, Tm or
-any per-probe check; the only thing that reveals it is asking where the arms
-point. That check found a real defect in 4 of 8 hand-made primaries.
+`TestArmGeometry` is the one to read, and it is also where a wrong conclusion got
+caught. Where the two arms are anchored is invisible to any per-probe check --
+two pads on the other arms give identical lengths, composition and Tm -- so
+`arm_offsets` is worth having. But "the arms are anchored far apart" was
+initially read as "this pair cannot signal", and that was wrong: the arms are
+flexible ssDNA tethers that loop back, and the lab's hand-made antisense pairs
+are built that way and do give signal. The tests below now pin down the geometry
+without the verdict that does not follow from it.
 """
 from __future__ import annotations
 
@@ -29,10 +33,11 @@ from mypibypy.design import (
     GAP_THREE_PRIME,
     LEFT_LEN,
     PADS_AS_ORDERED,
-    PADS_JUXTAPOSED,
+    PADS_DIRECT,
     FusionGeometryError,
     arm_offsets,
-    arms_are_juxtaposed,
+    arm_separation,
+    arms_meet_at_junction,
     build_fusion_pairs,
     check_partner_specificity,
     fusion_candidate,
@@ -196,25 +201,27 @@ class TestArmGeometry:
         sense, _ = build_fusion_pairs(junction.name, junction.sequence,
                                       junction.breakpoint, sense_sys)
         assert arm_offsets(sense, fp) == (LEFT_LEN - 1, LEFT_LEN + 1)
-        assert arms_are_juxtaposed(sense, fp)
+        assert arms_meet_at_junction(sense, fp)
+        assert arm_separation(sense, fp) == 2
 
     def test_antisense_pair_arms_also_meet_at_the_gap(self, junction, two_systems):
         sense_sys, anti_sys = two_systems
         _, fp = fusion_footprint(junction.sequence, junction.breakpoint)
         _, anti = build_fusion_pairs(junction.name, junction.sequence,
                                      junction.breakpoint, sense_sys, anti_sys)
-        assert arms_are_juxtaposed(anti, fp), (
-            "the antisense pair must rebuild the P2 site too, or it makes no spot")
+        assert arms_meet_at_junction(anti, fp)
         assert arm_offsets(anti, fp) == (LEFT_LEN + 1, LEFT_LEN - 1)
+        assert arm_separation(anti, fp) == 2
 
-    def test_swapped_pads_point_the_arms_away_from_the_junction(
+    def test_as_ordered_anchors_the_arms_at_the_outer_ends(
             self, junction, two_systems):
-        """The defect found in the hand-made designs, pinned down.
+        """The hand-made convention's geometry -- a fact, not a verdict.
 
         `as_ordered` reproduces how the lab's two fusion antisense pairs were
-        built. The pair looks well formed -- right lengths, right arms, right
-        pads -- but both arms end up at the outer edges of the footprint instead
-        of at the gap, so P2's landing site is never reconstituted.
+        built. Both arms end up anchored at the footprint's outer ends rather
+        than either side of the gap, so they have to loop back to present P2
+        together. These pairs give signal at the bench, so this asserts the
+        separation and nothing about whether it works.
         """
         sense_sys, anti_sys = two_systems
         _, fp = fusion_footprint(junction.sequence, junction.breakpoint)
@@ -222,14 +229,35 @@ class TestArmGeometry:
                                      junction.breakpoint, sense_sys, anti_sys,
                                      pad_assignment=PADS_AS_ORDERED)
         assert arm_offsets(anti, fp) == (0, FOOTPRINT - 1)
-        assert not arms_are_juxtaposed(anti, fp)
-        assert any("arms point away" in f for f in anti.candidate.flags)
+        assert arm_separation(anti, fp) == FOOTPRINT - 1
+        assert not arms_meet_at_junction(anti, fp), "they are anchored apart..."
+        assert any("loop back" in f for f in anti.candidate.flags)
+
+    def test_the_geometry_check_is_not_a_pass_fail_verdict(self, junction, registry):
+        """Guards the mistake itself: a False here must not read as "broken".
+
+        The flag the pipeline attaches to an as-ordered pair has to describe the
+        geometry and say that such pairs do signal. If someone later shortens it
+        back to "P2 cannot bind", this fails.
+        """
+        from mypibypy.pipeline import design_fusion
+        from mypibypy.loci import FusionJunction
+        # FusionJunction carries registry *keys*, not AmplifierSystem.name.
+        keys = sorted(registry)
+        j = FusionJunction(junction.name, "A", "B", junction.sequence,
+                           junction.breakpoint, keys[0], keys[-1])
+        results = design_fusion(j, screen=False, pad_assignment=PADS_AS_ORDERED)
+        flags = " ".join(f for r in results for f in r.best.flags)
+        assert "loop back" in flags, "the geometry must still be described"
+        assert "signal" in flags and "no signal" not in flags, (
+            f"the flag must affirm that such pairs signal, not deny it: {flags}")
+        assert "cannot bind" not in flags
 
     def test_the_two_conventions_differ_only_for_the_antisense_pair(
             self, junction, two_systems):
         sense_sys, anti_sys = two_systems
         a = build_fusion_pairs(junction.name, junction.sequence, junction.breakpoint,
-                               sense_sys, anti_sys, pad_assignment=PADS_JUXTAPOSED)
+                               sense_sys, anti_sys, pad_assignment=PADS_DIRECT)
         b = build_fusion_pairs(junction.name, junction.sequence, junction.breakpoint,
                                sense_sys, anti_sys, pad_assignment=PADS_AS_ORDERED)
         assert (a[0].p1l, a[0].p1r) == (b[0].p1l, b[0].p1r), "sense pair is unaffected"
@@ -378,21 +406,26 @@ class TestReproducesHandMadeDesigns:
         for row in off:
             assert row["built_len"] - row["ordered_len"] == 1, row
 
-    def test_the_ordered_antisense_pairs_are_not_juxtaposed(self, designs, two_systems):
-        """The defect. Every antisense pair as ordered has its arms on the outside."""
+    def test_the_ordered_antisense_arms_sit_at_the_outer_ends(self, designs, two_systems):
+        """Both hand-made antisense pairs anchor their arms 50 nt apart.
+
+        These pairs are bench-validated, so this documents the geometry of a
+        design that WORKS. It is the evidence behind
+        specificity.DEFAULT_SIGNAL_GAP_NT: if a designed pair bridges 50 nt,
+        an accidental off-target pair can bridge it too.
+        """
         sense_sys, anti_sys = two_systems
         for sheet, (footprint, _) in designs.items():
             sense, anti = pairs_from_footprint(sheet, footprint, sense_sys, anti_sys,
                                                pad_assignment=PADS_AS_ORDERED)
-            assert arms_are_juxtaposed(sense, footprint), f"{sheet}: sense pair is fine"
-            assert not arms_are_juxtaposed(anti, footprint), (
-                f"{sheet}: antisense pair unexpectedly juxtaposed -- the geometric "
-                f"model in design.arm_offsets may be wrong, re-check before acting")
+            assert arms_meet_at_junction(sense, footprint), f"{sheet}: sense pair"
             assert arm_offsets(anti, footprint) == (0, FOOTPRINT - 1)
+            assert arm_separation(anti, footprint) == FOOTPRINT - 1
 
-    def test_the_corrected_convention_fixes_the_geometry(self, designs, two_systems):
+    def test_the_direct_convention_anchors_both_arms_at_the_junction(
+            self, designs, two_systems):
         sense_sys, anti_sys = two_systems
         for sheet, (footprint, _) in designs.items():
             for pair in pairs_from_footprint(sheet, footprint, sense_sys, anti_sys,
-                                             pad_assignment=PADS_JUXTAPOSED):
-                assert arms_are_juxtaposed(pair, footprint), f"{sheet}/{pair.p1l_name}"
+                                             pad_assignment=PADS_DIRECT):
+                assert arms_meet_at_junction(pair, footprint), f"{sheet}/{pair.p1l_name}"

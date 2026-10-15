@@ -259,20 +259,36 @@ def fusion_candidate(junction_name: str, sequence: str, breakpoint: int,
 
 #: How the antisense pair's two pads are assigned to the two arms.
 #:
-#: ``juxtaposed`` applies the unchanged P1L/P1R rule to revcomp(footprint). Both
-#: arms then meet at the gap, exactly as in the sense pair, and P2's landing site
-#: can form.
+#: ``direct`` applies the unchanged P1L/P1R rule to revcomp(footprint), so both
+#: arms are anchored beside the gap exactly as in the sense pair and P2's
+#: landing site forms without the arms having to reach.
 #:
-#: ``as_ordered`` reproduces the convention used in the lab's two hand-made
-#: fusion designs: the sense footprint's left25 used *forward* rather than
-#: reverse complemented, keeping the left25 -> P1L mapping. Because the antisense
-#: probes bind the opposite strand, that points both arms AWAY from the junction
-#: -- simulated at 50 nt apart on a 51-nt footprint, versus 2 nt for a working
-#: pair. P2's site is never reconstituted, so such a pair should give no signal.
-#: It exists here only so the historical designs can be regenerated and audited.
-#: See `verify_against`.
-PADS_JUXTAPOSED = "juxtaposed"
+#: ``as_ordered`` reproduces the convention in the lab's two hand-made fusion
+#: designs: the sense footprint's left25 used *forward* rather than reverse
+#: complemented, keeping the left25 -> P1L mapping. Because the antisense probes
+#: bind the opposite strand, the arms end up anchored at the footprint's OUTER
+#: ends -- 50 nt apart on a 51-nt footprint, against 2 nt for the sense pair.
+#:
+#: BOTH CONVENTIONS WORK AT THE BENCH. An earlier version of this comment claimed
+#: ``as_ordered`` could not produce signal, reasoning that arms 50 nt apart could
+#: never present one 29-nt P2 site. That was wrong: it treated the arms as rigid
+#: rods. They are flexible single-stranded tethers -- 22 nt is ~14 nm of contour
+#: against the ~17 nm spanned by 50 bp of B-form duplex -- so the two arms can
+#: loop back toward each other with the duplex bulging out between them. The
+#: lab's as-ordered antisense pairs are bench-confirmed to give signal, which
+#: settles it; the physical argument above only explains why they can.
+#:
+#: So this is a choice between two working geometries, not between a right and a
+#: wrong one. ``direct`` is the default because it matches the sense pairs and
+#: needs no looping, which should cost less entropically and is the only one of
+#: the two with a mechanistic reason to be the more efficient. That ranking is
+#: untested: nobody has compared the two side by side at matched conditions.
+PADS_DIRECT = "direct"
 PADS_AS_ORDERED = "as_ordered"
+
+#: Kept so existing callers and scripts keep working; ``direct`` is the name to
+#: use, since "juxtaposed" overstated what the alternative fails to do.
+PADS_JUXTAPOSED = PADS_DIRECT
 
 
 def build_fusion_pairs(junction_name: str, sequence: str, breakpoint: int,
@@ -280,7 +296,7 @@ def build_fusion_pairs(junction_name: str, sequence: str, breakpoint: int,
                        antisense_system: AmplifierSystem | None = None,
                        gap_side: str = GAP_FIVE_PRIME,
                        name_prefix: str | None = None,
-                       pad_assignment: str = PADS_JUXTAPOSED) -> list[ProbePair]:
+                       pad_assignment: str = PADS_DIRECT) -> list[ProbePair]:
     """The sense and antisense pairs for one junction -- the lab's unit of order.
 
     A junction is always ordered as both strands. `antisense_system` defaults to
@@ -295,8 +311,8 @@ def build_fusion_pairs(junction_name: str, sequence: str, breakpoint: int,
     complementary pads and will dimerize if pooled in one tube; `crosshyb`
     classifies that as expected-by-design rather than flagging it.
     """
-    if pad_assignment not in (PADS_JUXTAPOSED, PADS_AS_ORDERED):
-        raise ValueError(f"pad_assignment must be {PADS_JUXTAPOSED!r} or "
+    if pad_assignment not in (PADS_DIRECT, PADS_AS_ORDERED):
+        raise ValueError(f"pad_assignment must be {PADS_DIRECT!r} or "
                          f"{PADS_AS_ORDERED!r}")
     antisense_system = antisense_system or sense_system
     prefix = name_prefix or junction_name
@@ -308,8 +324,9 @@ def build_fusion_pairs(junction_name: str, sequence: str, breakpoint: int,
         if anti and pad_assignment == PADS_AS_ORDERED:
             # Swap which pad gets which arm, reproducing the hand-made designs.
             cand = replace(cand, left=cand.right, right=cand.left,
-                           flags=[*cand.flags, "pads swapped: arms point away "
-                                  "from the junction, P2 cannot bind"])
+                           flags=[*cand.flags, "arms anchored at the footprint's "
+                                  "outer ends and must loop back to present P2 "
+                                  "(the lab's hand-made convention; gives signal)"])
         pairs.append(build_pair(
             f"{junction_name}_{tag}", system, cand,
             p1l_name=f"P1L_{prefix}_{tag}", p1r_name=f"P1R_{prefix}_{tag}",
@@ -320,7 +337,7 @@ def build_fusion_pairs(junction_name: str, sequence: str, breakpoint: int,
 def pairs_from_footprint(name: str, footprint: str, sense_system: AmplifierSystem,
                          antisense_system: AmplifierSystem | None = None,
                          name_prefix: str | None = None,
-                         pad_assignment: str = PADS_JUXTAPOSED) -> list[ProbePair]:
+                         pad_assignment: str = PADS_DIRECT) -> list[ProbePair]:
     """Sense + antisense pairs from a 51-nt footprint that is already chosen.
 
     The breakpoint-placement step is skipped: this takes the footprint as given.
@@ -366,18 +383,40 @@ def arm_offsets(pair: ProbePair, footprint: str) -> tuple[int, int] | None:
     return out[0], out[1]
 
 
-def arms_are_juxtaposed(pair: ProbePair, footprint: str, slack: int = 1) -> bool:
-    """Do both arms reach the gap, so P2's landing site can form?
+def arm_separation(pair: ProbePair, footprint: str) -> int | None:
+    """How far apart the two arms are anchored, in nt along the footprint.
 
-    The whole coincidence mechanism depends on this and nothing in the probe
-    sequences alone reveals it -- a pair with its pads on the wrong arms looks
-    perfectly well-formed until you ask where the arms point.
+    2 nt for a pair whose arms sit either side of the gap; 50 nt on a 51-nt
+    footprint for the lab's as-ordered antisense convention, where they sit at
+    the outer ends. Returns None if either pad does not anneal.
+    """
+    offsets = arm_offsets(pair, footprint)
+    return None if offsets is None else abs(offsets[0] - offsets[1])
+
+
+def arms_meet_at_junction(pair: ProbePair, footprint: str, slack: int = 1) -> bool:
+    """Are both arms anchored beside the gap, needing no reach to present P2?
+
+    This is a question about *geometry*, not about whether the pair works. A
+    pair whose arms are anchored at the footprint's outer ends still signals --
+    the arms are flexible ssDNA and loop back, as the lab's hand-made antisense
+    pairs demonstrate at the bench. So a False here means "the arms have to
+    reach", not "this will not work", and callers must not treat it as a defect.
+
+    Nothing in the probe sequences alone reveals which case you are in, which is
+    why this exists: a pair with its pads on the other arms looks identical by
+    length, composition and Tm.
     """
     offsets = arm_offsets(pair, footprint)
     if offsets is None:
         return False
     gap = LEFT_LEN  # 0-based index of the skipped base
     return all(abs(o - gap) <= slack + 1 for o in offsets)
+
+
+#: Previous name. It read as a verdict on whether a pair could work, which it
+#: never was -- see `arms_meet_at_junction`.
+arms_are_juxtaposed = arms_meet_at_junction
 
 
 def verify_against(built: list[ProbePair], ordered: dict[str, str]) -> list[dict]:

@@ -36,7 +36,7 @@ python -m mypibypy fusion --loci loci.local.json -o fusion_order.xlsx
 |---|---|
 | [`mypibypy/`](mypibypy/) | the package, its tests, and [the real README](mypibypy/README.md) |
 | [`mypibypy/src/mypibypy/`](mypibypy/src/mypibypy/) | design, screening and workbook modules |
-| [`mypibypy/tests/`](mypibypy/tests/) | 150 tests; the aligner-backed ones skip without blast/bowtie |
+| [`mypibypy/tests/`](mypibypy/tests/) | 158 tests; the aligner-backed ones skip without blast/bowtie |
 | [`mypibypy/scripts/`](mypibypy/scripts/) | threshold calibration and backend sensitivity benchmarks |
 
 ## No sequences in this repository

@@ -50,6 +50,15 @@ database silently changes meaning on another; with short queries it also throws
 away true sites. The BLAST call therefore passes a deliberately permissive
 ``-evalue`` and does the real filtering here.
 
+HOW CLOSE IS "TOGETHER" -- corrected. The pairing window that decides whether
+two off-target half-hits could actually make a spot was originally 10 nt, from
+the 1-nt design gap plus slack. The lab's own hand-made antisense fusion pairs
+then turned out to anchor their arms 50 nt apart and still give signal, because
+the arms are flexible single-stranded tethers rather than rigid rods. So the
+threshold is now 50 nt, and it is an observed lower bound rather than a measured
+limit -- see `DEFAULT_SIGNAL_GAP_NT`. The correction only ever loosens what the
+screen is willing to call dangerous.
+
 DEGRADED MODE IS A FIRST-CLASS RESULT. With no database configured the report
 comes back ``NOT_SCREENED`` with a reason, and every consumer must render that
 honestly. An earlier version of the order workbook asserted a specificity result
@@ -93,10 +102,26 @@ DEFAULT_MAX_MISMATCHES = 3
 #: a pair landing even loosely together is worth a human look.
 DEFAULT_WINDOW_NT = 200
 
-#: Gap at or below which the two halves are "juxtaposed" -- close enough to
-#: reconstitute the P2 landing site, i.e. close enough to make a real spot.
-#: The design gap is 1 nt; a few nt of slack covers indel-containing alignments.
-DEFAULT_JUXTAPOSED_GAP_NT = 10
+#: Gap at or below which an off-target pair is treated as able to reconstitute
+#: the P2 landing site -- i.e. able to make a real spot, not merely to sit nearby.
+#:
+#: This was 10 nt, reasoning from the 1-nt design gap plus slack for
+#: indel-containing alignments. That was too tight, and too tight in the
+#: dangerous direction: it called genuinely signal-capable off-target pairs
+#: merely "co-localized". The lab's hand-made antisense fusion pairs anchor
+#: their two arms 50 nt apart and still give signal at the bench, because the
+#: arms are flexible single-stranded tethers (22 nt is ~14 nm of contour against
+#: the ~17 nm spanned by 50 bp of duplex) and loop back to present P2 together.
+#: If a *designed* pair bridges 50 nt, an accidental one can too.
+#:
+#: 50 nt is therefore an observed lower bound on what works, not a measured
+#: limit -- nobody has found the separation at which signal actually stops. Raise
+#: it if you want more margin; do not lower it without bench evidence.
+DEFAULT_SIGNAL_GAP_NT = 50
+
+#: Previous name and value, kept so existing callers do not silently change
+#: behaviour on import. Prefer `DEFAULT_SIGNAL_GAP_NT`.
+DEFAULT_JUXTAPOSED_GAP_NT = DEFAULT_SIGNAL_GAP_NT
 
 #: Shortest aligned block worth carrying forward. NOT an arbitrary round
 #: number: `thermo` puts a perfect 14-bp duplex at roughly -1 C margin against
@@ -113,7 +138,7 @@ DEFAULT_MIN_ALIGNED_NT = 15
 #: Score deductions. Starting points calibrated against nothing but judgement --
 #: there are three designs in hand, far too few to fit these. Treat the hit
 #: lists as the result and the score as a sort key.
-PENALTY_SURVIVING_JUXTAPOSED = 1.0
+PENALTY_SURVIVING_SIGNAL_CAPABLE = 1.0
 PENALTY_SURVIVING_COLOCALIZED = 0.5
 PENALTY_NONSURVIVING_PAIR = 0.1
 PENALTY_SURVIVING_SINGLE = 0.02
@@ -195,20 +220,30 @@ class PairSite:
     correct_order: bool     # halves in the order the target geometry requires
     survives_wash: bool     # both duplexes predicted still bound after every step
     min_margin_c: float     # worst per-step Tm margin across both halves
-    juxtaposed_gap_nt: int = DEFAULT_JUXTAPOSED_GAP_NT
+    signal_gap_nt: int = DEFAULT_SIGNAL_GAP_NT
+
+    @property
+    def signal_capable(self) -> bool:
+        """Close enough, and oriented right, to reconstitute the P2 site.
+
+        "Close enough" is generous on purpose -- the arms are flexible tethers
+        and bridge tens of nt, see `DEFAULT_SIGNAL_GAP_NT`. A site that is not
+        signal-capable is still reported; it just cannot make a spot.
+        """
+        return (self.same_strand and self.correct_order
+                and 0 <= self.gap_nt <= self.signal_gap_nt)
 
     @property
     def juxtaposed(self) -> bool:
-        """Close enough, and oriented right, to reconstitute the P2 site."""
-        return (self.same_strand and self.correct_order
-                and 0 <= self.gap_nt <= self.juxtaposed_gap_nt)
+        """Deprecated alias for `signal_capable`, which says what it means."""
+        return self.signal_capable
 
     @property
     def total_mismatches(self) -> int:
         return self.left.effective_mismatches + self.right.effective_mismatches
 
     def __str__(self) -> str:
-        kind = "JUXTAPOSED" if self.juxtaposed else "co-localized"
+        kind = "SIGNAL-CAPABLE" if self.signal_capable else "co-localized"
         wash = "survives wash" if self.survives_wash else "melts in wash"
         return (f"{kind} {self.chrom}:{min(self.left.start, self.right.start):,} "
                 f"gap {self.gap_nt} nt, {self.total_mismatches} mm total, "
@@ -422,7 +457,7 @@ def _wash_outcome(hit: Hit, query_seq: str,
 
 def pair_hits(left_hits: list[Hit], right_hits: list[Hit], left_seq: str,
               right_seq: str, window_nt: int = DEFAULT_WINDOW_NT,
-              juxtaposed_gap_nt: int = DEFAULT_JUXTAPOSED_GAP_NT,
+              signal_gap_nt: int = DEFAULT_SIGNAL_GAP_NT,
               steps: tuple[thermo.Conditions, ...] = thermo.ALL_STEPS,
               penalty_c: float = thermo.DEFAULT_MISMATCH_PENALTY_C) -> list[PairSite]:
     """Join per-half hits into candidate signal-producing sites.
@@ -475,9 +510,10 @@ def pair_hits(left_hits: list[Hit], right_hits: list[Hit], left_seq: str,
                 chrom=lh.chrom, left=lh, right=rh, gap_nt=gap,
                 same_strand=lh.strand == rh.strand, correct_order=correct_order,
                 survives_wash=l_ok and r_ok, min_margin_c=min(l_margin, r_margin),
-                juxtaposed_gap_nt=juxtaposed_gap_nt,
+                signal_gap_nt=signal_gap_nt,
             ))
-    sites.sort(key=lambda s: (not s.juxtaposed, not s.survives_wash, s.total_mismatches))
+    sites.sort(key=lambda s: (not s.signal_capable, not s.survives_wash,
+                              s.total_mismatches))
     return sites
 
 
@@ -514,8 +550,14 @@ class SpecificityReport:
         return [s for s in self.pair_sites if s.survives_wash]
 
     @property
+    def signal_capable_sites(self) -> list[PairSite]:
+        """Off-target sites that could actually make a spot. The ones that matter."""
+        return [s for s in self.pair_sites if s.signal_capable]
+
+    @property
     def juxtaposed_sites(self) -> list[PairSite]:
-        return [s for s in self.pair_sites if s.juxtaposed]
+        """Deprecated alias for `signal_capable_sites`."""
+        return self.signal_capable_sites
 
     @property
     def single_half_hits(self) -> list[Hit]:
@@ -537,8 +579,8 @@ class SpecificityReport:
             return float("nan")
         score = 1.0
         for s in self.pair_sites:
-            if s.survives_wash and s.juxtaposed:
-                score -= PENALTY_SURVIVING_JUXTAPOSED
+            if s.survives_wash and s.signal_capable:
+                score -= PENALTY_SURVIVING_SIGNAL_CAPABLE
             elif s.survives_wash:
                 score -= PENALTY_SURVIVING_COLOCALIZED
             else:
@@ -556,7 +598,7 @@ class SpecificityReport:
         """``pass`` / ``review`` / ``fail`` / ``not screened``."""
         if not self.screened:
             return "not screened"
-        if any(s.survives_wash and s.juxtaposed for s in self.pair_sites):
+        if any(s.survives_wash and s.signal_capable for s in self.pair_sites):
             return "fail"
         if self.pair_sites or self.score < 0.9:
             return "review"
@@ -568,13 +610,14 @@ class SpecificityReport:
         if self.status == ERROR:
             return f"SCREEN FAILED -- {self.reason}"
         n_surv = len(self.surviving_sites)
-        n_jux = len([s for s in self.pair_sites if s.juxtaposed and s.survives_wash])
+        n_cap = len([s for s in self.pair_sites
+                     if s.signal_capable and s.survives_wash])
         return (
             f"{self.backend}: {len(self.left_hits)} left / {len(self.right_hits)} right "
             f"half-hits at <={self.max_mismatches} mismatches; "
             f"{len(self.pair_sites)} off-target site(s) with both halves within "
             f"{self.window_nt} nt, of which {n_surv} predicted to survive the wash "
-            f"and {n_jux} juxtaposed closely enough to reconstitute the P2 site "
+            f"and {n_cap} close enough and oriented to reconstitute the P2 site "
             f"-- verdict {self.verdict} "
             f"[{self.n_raw_hits} raw alignments; {self.n_dropped_mismatch} over "
             f"budget, {self.n_dropped_short} shorter than {self.min_aligned_nt} nt]"
@@ -598,7 +641,7 @@ class SpecificityReport:
             "n_dropped_short": self.n_dropped_short,
             "n_dropped_mismatch": self.n_dropped_mismatch,
             "min_aligned_nt": self.min_aligned_nt,
-            "n_juxtaposed_sites": len(self.juxtaposed_sites),
+            "n_signal_capable_sites": len(self.signal_capable_sites),
             "score": self.score,
             "verdict": self.verdict,
             "sites": [str(s) for s in self.pair_sites],
@@ -615,7 +658,7 @@ def screen_pair(left_seq: str, right_seq: str, backend: Backend | None = None,
                 on_target: GenomicInterval | None = None,
                 window_nt: int = DEFAULT_WINDOW_NT,
                 max_mismatches: int = DEFAULT_MAX_MISMATCHES,
-                juxtaposed_gap_nt: int = DEFAULT_JUXTAPOSED_GAP_NT,
+                signal_gap_nt: int = DEFAULT_SIGNAL_GAP_NT,
                 min_aligned_nt: int = DEFAULT_MIN_ALIGNED_NT,
                 steps: tuple[thermo.Conditions, ...] = thermo.ALL_STEPS,
                 penalty_c: float = thermo.DEFAULT_MISMATCH_PENALTY_C,
@@ -657,7 +700,7 @@ def screen_pair(left_seq: str, right_seq: str, backend: Backend | None = None,
     right_hits = [h for h in long_enough if h.query == "right"]
 
     sites = pair_hits(left_hits, right_hits, left_seq, right_seq,
-                      window_nt=window_nt, juxtaposed_gap_nt=juxtaposed_gap_nt,
+                      window_nt=window_nt, signal_gap_nt=signal_gap_nt,
                       steps=steps, penalty_c=penalty_c)
     return SpecificityReport(
         status=SCREENED, backend=backend.describe(), database=backend.database,

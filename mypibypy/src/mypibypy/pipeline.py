@@ -11,10 +11,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .design import (
-    PADS_JUXTAPOSED,
+    PADS_DIRECT,
     Candidate,
     ProbePair,
-    arms_are_juxtaposed,
+    arm_separation,
+    arms_meet_at_junction,
     build_fusion_pairs,
     build_pair,
     check_partner_specificity,
@@ -72,7 +73,7 @@ def design_locus(locus: Locus, top: int = 5, backend: Backend | None = None,
 
 
 def design_fusion(junction: FusionJunction, backend=None, screen: bool = True,
-                  pad_assignment: str = PADS_JUXTAPOSED,
+                  pad_assignment: str = PADS_DIRECT,
                   **screen_kwargs) -> list[DesignResult]:
     """Design a fusion junction: one sense result and one antisense result.
 
@@ -107,9 +108,14 @@ def design_fusion(junction: FusionJunction, backend=None, screen: bool = True,
         strand = "antisense" if "antisense" in pair.p1l_name else "sense"
         flags = list(cand.flags)
         flags += [f"partner: {p}" for p in partner_problems]
-        if not arms_are_juxtaposed(pair, footprint):
-            flags.append("arms do not meet at the breakpoint -- P2 cannot bind, "
-                         "this pair should give no signal")
+        if not arms_meet_at_junction(pair, footprint) and not any(
+                "loop back" in f for f in flags):
+            sep = arm_separation(pair, footprint)
+            flags.append(
+                f"arms anchored {sep} nt apart rather than either side of the "
+                f"breakpoint, so they must loop back to present P2 together. "
+                f"The lab's hand-made pairs are built this way and do give "
+                f"signal; relative efficiency has not been compared")
         cand.flags = flags
         locus = Locus(
             name=f"{junction.name}_{strand}",

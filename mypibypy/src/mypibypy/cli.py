@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 import re
 
-from .design import PADS_AS_ORDERED, PADS_JUXTAPOSED
+from .design import PADS_AS_ORDERED, PADS_DIRECT
 from .loci import Locus, is_example, load_fusions, load_loci, resolve_loci_path
 from .pipeline import design_fusion, design_locus
 from .sequence import GenomicInterval
@@ -101,12 +101,14 @@ def main(argv=None):
     f = sub.add_parser("fusion", help="design every fusion junction in a loci file")
     f.add_argument("--loci", help="path to a loci JSON file with a 'fusions' key")
     f.add_argument("-o", "--out", required=True)
-    f.add_argument("--pad-assignment", default=PADS_JUXTAPOSED,
-                   choices=[PADS_JUXTAPOSED, PADS_AS_ORDERED],
-                   help=f"{PADS_JUXTAPOSED} (default) puts both arms at the "
-                        f"breakpoint so P2 can bind; {PADS_AS_ORDERED} reproduces "
-                        f"the lab's hand-made antisense convention, whose arms "
-                        f"point away from the junction -- for audit only")
+    f.add_argument("--pad-assignment", default=PADS_DIRECT,
+                   choices=[PADS_DIRECT, PADS_AS_ORDERED],
+                   help=f"antisense pad-to-arm assignment. {PADS_DIRECT} "
+                        f"(default) anchors both arms beside the breakpoint, as "
+                        f"the sense pair does; {PADS_AS_ORDERED} reproduces the "
+                        f"lab's hand-made convention, which anchors them at the "
+                        f"footprint's outer ends so they loop back. Both give "
+                        f"signal at the bench; they have not been compared")
     _specificity_options(f)
 
     d = sub.add_parser("design", help="design one locus given on the command line")
@@ -134,9 +136,11 @@ def main(argv=None):
                                      pad_assignment=args.pad_assignment)
         if args.pad_assignment == PADS_AS_ORDERED:
             warnings.append(
-                "built with the as-ordered antisense convention: the antisense "
-                "arms point away from the breakpoint and those pairs are not "
-                "expected to produce signal. Use for audit, not for ordering")
+                "built with the as-ordered antisense convention, which anchors "
+                "the antisense arms at the footprint's outer ends so they must "
+                "loop back to present P2. That is how the lab's hand-made pairs "
+                "were built and they do give signal, but the two conventions "
+                "have never been compared side by side")
         note = (f"mypibypy fusion design of {len(fusions)} junction(s) from "
                 f"{resolve_loci_path(args.loci).name}, "
                 f"pad assignment {args.pad_assignment}.")

@@ -74,7 +74,7 @@ pip install -e .          # from this directory
 Then configure your amplifier systems (see below) and run the tests:
 
 ```bash
-pytest                    # 150 tests, no PYTHONPATH needed
+pytest                    # 158 tests, no PYTHONPATH needed
 ```
 
 ## Usage
@@ -145,8 +145,9 @@ rejects homopolymer / low-complexity runs. RepeatMasker overlap is reported.
 A piFISH pair only makes a spot when **both** halves bind adjacent target, so a
 genome hit for one half is not an off-target. `specificity.py` screens each half
 separately and then joins the hits: a site is reported only where both halves
-land on the same chromosome within a window, on the same strand and in an order
-that could actually rebuild P2's landing site. A lone-half hit lowers the score
+land on the same chromosome within the signal window (50 nt, see below), on the
+same strand and in an order that could rebuild P2's landing site. A lone-half
+hit lowers the score
 rather than rejecting the pair. Each site is then passed through `thermo` to turn
 "the aligner found it" into "it would still be bound after the washes".
 
@@ -188,11 +189,26 @@ parent gene alone can bring both halves together. `check_partner_specificity`
 enforces that each pad is present in its own partner and absent from the other
 (both strands). Sense and antisense pairs are emitted together, on two channels.
 
-`design.arms_are_juxtaposed` answers the question no per-probe check can: do the
-two constant arms actually meet at the gap, so P2's landing site can form? A pair
-with its pads on the wrong arms has the right lengths, the right arms and the
-right pads, and still cannot signal — its arms point at the footprint's outer
-edges instead of at the junction.
+`design.arm_offsets` / `arm_separation` answer a question no per-probe check can:
+where are the two constant arms actually anchored? A pair with its pads on the
+other arms has the right lengths, the right arms and the right pads, and differs
+only in that its arms sit at the footprint's outer ends rather than either side
+of the gap. `--pad-assignment` chooses between the two, defaulting to `direct`
+(arms beside the gap, as in the sense pair).
+
+Both conventions give signal at the bench. An earlier version of this tool
+claimed the outer-end geometry could not work, reasoning that arms 50 nt apart
+could never present one 29-nt P2 site — that treated the arms as rigid rods when
+they are flexible single-stranded tethers (22 nt is ~14 nm of contour against the
+~17 nm spanned by 50 bp of duplex), and the lab's hand-made antisense pairs are
+built that way and do produce signal. `arms_meet_at_junction` reports the
+geometry only; it is not a verdict on whether a pair works, and the relative
+efficiency of the two has never been measured.
+
+That correction propagates into screening: if a *designed* pair bridges 50 nt,
+an accidental one can too, so `specificity.DEFAULT_SIGNAL_GAP_NT` is 50 nt rather
+than the 10 nt originally used. It is an observed lower bound, not a measured
+limit.
 
 ## Recording what happened
 

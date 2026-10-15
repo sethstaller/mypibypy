@@ -84,7 +84,8 @@ class DesignFacts:
     crosshyb_summary: str = ""
     crosshyb_worst_bp: int | None = None
     is_fusion: bool = False
-    arms_juxtaposed: bool | None = None
+    arms_meet_at_junction: bool | None = None
+    arm_separation_nt: int | None = None
     notes: str = ""
 
 
