@@ -21,6 +21,32 @@ TITLE = Font(name=FONT, bold=True, size=13)
 NEW_FILL = PatternFill("solid", fgColor="FFF2CC")     # pale yellow = order this
 REUSE_FILL = PatternFill("solid", fgColor="E2EFDA")   # pale green = already in hand
 HDR_FILL = PatternFill("solid", fgColor="D9D9D9")
+WARN_FILL = PatternFill("solid", fgColor="FCE4D6")     # pale orange = unverified
+
+
+def _specificity_text(rep) -> str:
+    """One cell describing the genome screen, including it not having happened.
+
+    This function is the whole reason `SpecificityReport` has a `screened` flag.
+    An earlier workbook asserted a specificity result unconditionally and put an
+    unverified "repeat-free single-copy" claim onto a real order sheet.
+    """
+    if not rep.screened:
+        return ("NO GENOME-WIDE SPECIFICITY SCREEN WAS RUN for this locus "
+                f"({rep.reason}). Nothing here establishes single-copy status. "
+                "Configure a local bowtie v1 index ($MYPIBYPY_BOWTIE_INDEX) or "
+                "BLAST database ($MYPIBYPY_BLAST_DB) and re-run before ordering.")
+    verdict = {
+        "pass": "PASS -- no off-target site where both halves land together",
+        "review": "REVIEW -- off-target co-localization found, see below",
+        "fail": "FAIL -- both halves land together elsewhere; do not order",
+    }.get(rep.verdict, rep.verdict.upper())
+    text = f"{verdict}. {rep.summary()}"
+    for site in rep.pair_sites[:5]:
+        text += f"\n  - {site}"
+    if len(rep.pair_sites) > 5:
+        text += f"\n  - ... and {len(rep.pair_sites) - 5} more"
+    return text
 
 
 def _hdr(ws, row, values, widths=None):
@@ -82,9 +108,10 @@ def _notes_sheet(wb, results, source_note):
         r += 1
     r += 1
     ws.cell(row=r, column=1, value="Specificity").font = H
-    # Report what actually ran. A workbook must never assert a screen that was
-    # not performed: RepeatMasker only says a footprint avoids annotated
-    # repeats, which is not the same as being single-copy genome-wide.
+    # Report what actually ran, per locus. A workbook must never assert a screen
+    # that was not performed: RepeatMasker only says a footprint avoids
+    # annotated repeats, which is not the same as being single-copy genome-wide,
+    # and a pair-aware screen is the only thing that speaks to piFISH signal.
     total_rmsk = sum(len(res.rmsk) for res in results)
     n = len(results)
     ws.cell(row=r, column=2, value=(
@@ -92,12 +119,21 @@ def _notes_sheet(wb, results, source_note):
         f"{n} chosen footprint{'s' if n != 1 else ''}"
         + ("; none placed in annotated repetitive DNA. " if total_rmsk == 0
            else " -- review before ordering. ")
-        + "NO GENOME-WIDE SPECIFICITY SCREEN HAS BEEN RUN. RepeatMasker does not "
-          "establish single-copy status; run a genome-wide check (local BLAST or "
-          "bowtie) and record the result before ordering."
+        + "RepeatMasker does not establish single-copy status; the genome-wide "
+          "result per locus is below."
     )).font = B
     ws.cell(row=r, column=2).alignment = Alignment(wrap_text=True, vertical="top")
-    r += 2
+    r += 1
+    for res in results:
+        L = res.locus
+        ws.cell(row=r, column=1, value=f"  {L.gene} {L.name}").font = B
+        cell = ws.cell(row=r, column=2, value=_specificity_text(res.specificity))
+        cell.font = B
+        cell.alignment = Alignment(wrap_text=True, vertical="top")
+        if not res.specificity.screened or res.specificity.verdict == "fail":
+            cell.fill = WARN_FILL
+        r += 1
+    r += 1
     ws.cell(row=r, column=1, value="Source/provenance").font = H
     ws.cell(row=r, column=2, value=source_note).font = B
     ws.cell(row=r, column=2).alignment = Alignment(wrap_text=True, vertical="top")
@@ -174,9 +210,10 @@ def _locus_sheet(wb, res):
     kv(10, "left GC / Tm", f"{c.left.gc*100:.0f}% / {c.left.tm:.1f} C")
     kv(11, "right GC / Tm", f"{c.right.gc*100:.0f}% / {c.right.tm:.1f} C")
     kv(12, "QC flags", ", ".join(c.flags) or "none")
-    kv(14, p.p1l_name, p.p1l, mono=True)
-    kv(15, p.p1r_name, p.p1r, mono=True)
-    kv(17, "Region sequence (plus, 5'->3')", res.region_seq, mono=True)
+    kv(13, "Genome screen", _specificity_text(res.specificity))
+    kv(15, p.p1l_name, p.p1l, mono=True)
+    kv(16, p.p1r_name, p.p1r, mono=True)
+    kv(18, "Region sequence (plus, 5'->3')", res.region_seq, mono=True)
     return ws
 
 

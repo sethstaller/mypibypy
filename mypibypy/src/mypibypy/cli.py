@@ -20,6 +20,7 @@ import re
 from .loci import Locus, is_example, load_loci, resolve_loci_path
 from .pipeline import design_locus
 from .sequence import GenomicInterval
+from .specificity import SpecificityNotConfigured, resolve_backend
 from .systems import is_example as systems_are_example
 from .systems import loaded_from as systems_loaded_from
 from .systems import systems
@@ -45,6 +46,29 @@ def _report(results):
               f"footprint {res.best.interval}  (rmsk hits: {len(res.rmsk)})")
         print(f"  {p.p1l_name}: {p.p1l}")
         print(f"  {p.p1r_name}: {p.p1r}")
+        print(f"  specificity: {res.specificity.summary()}")
+
+
+def _specificity_options(ap):
+    """Shared screening options. Absent a database the run still succeeds, but
+    the workbook says in so many words that no screen was performed."""
+    ap.add_argument("--bowtie-index", help="bowtie v1 index basename "
+                                          f"(default: $MYPIBYPY_BOWTIE_INDEX)")
+    ap.add_argument("--blast-db", help="makeblastdb nucleotide database basename "
+                                      f"(default: $MYPIBYPY_BLAST_DB)")
+    ap.add_argument("--no-screen", action="store_true",
+                    help="skip the genome specificity screen entirely")
+
+
+def _backend_from(args):
+    """Resolve a screening backend, or None to let `screen_pair` degrade."""
+    if args.no_screen:
+        return None
+    try:
+        return resolve_backend(bowtie_index=args.bowtie_index, blast_db=args.blast_db)
+    except SpecificityNotConfigured as exc:
+        print(f"WARNING: no specificity screen will be run -- {exc}")
+        return None
 
 
 def _warn_if_example(loci_path=None) -> list[str]:
@@ -71,6 +95,7 @@ def main(argv=None):
     b = sub.add_parser("batch", help="design every locus in a loci file")
     b.add_argument("--loci", help="path to a loci JSON file (default: search order, see docs)")
     b.add_argument("-o", "--out", required=True)
+    _specificity_options(b)
 
     d = sub.add_parser("design", help="design one locus given on the command line")
     d.add_argument("--build", required=True)
@@ -79,13 +104,16 @@ def main(argv=None):
     d.add_argument("--gene", default="gene")
     d.add_argument("--name", default="locus")
     d.add_argument("-o", "--out", required=True)
+    _specificity_options(d)
 
     args = ap.parse_args(argv)
 
     if args.cmd == "batch":
         loci = load_loci(args.loci)
         warnings = _warn_if_example(args.loci)
-        results = [design_locus(L) for L in loci]
+        backend = _backend_from(args)
+        results = [design_locus(L, backend=backend, screen=not args.no_screen)
+                   for L in loci]
         note = (f"mypibypy batch design of {len(loci)} locus/loci from "
                 f"{resolve_loci_path(args.loci).name}.")
     else:
@@ -95,9 +123,16 @@ def main(argv=None):
         locus = Locus(args.name, args.gene, args.name,
                       _parse_region(args.build, args.region), args.system)
         warnings = _warn_if_example()
-        results = [design_locus(locus)]
+        backend = _backend_from(args)
+        results = [design_locus(locus, backend=backend, screen=not args.no_screen)]
         note = f"mypibypy design: {locus.interval}."
 
+    # An unscreened design must carry that fact into the workbook's provenance
+    # note, not only into the specificity cell.
+    unscreened = [r.locus.name for r in results if not r.specificity.screened]
+    if unscreened:
+        warnings.append(
+            f"no genome-wide specificity screen was run for: {', '.join(unscreened)}")
     for w in warnings:
         note += f" WARNING: {w}."
     write_workbook(args.out, results, note)
