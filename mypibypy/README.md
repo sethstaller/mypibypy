@@ -74,7 +74,7 @@ pip install -e .          # from this directory
 Then configure your amplifier systems (see below) and run the tests:
 
 ```bash
-pytest                    # 158 tests, no PYTHONPATH needed
+pytest                    # 217 tests, no PYTHONPATH needed
 ```
 
 ## Usage
@@ -209,6 +209,95 @@ That correction propagates into screening: if a *designed* pair bridges 50 nt,
 an accidental one can too, so `specificity.DEFAULT_SIGNAL_GAP_NT` is 50 nt rather
 than the 10 nt originally used. It is an observed lower bound, not a measured
 limit.
+
+## Screening a transcriptome: gene-level collapsing
+
+A gene appears once in a genome and ~8.5 times in GENCODE. Screened against a
+transcriptome without gene awareness, a probe finds its own target in every one
+of its isoforms, the pair logic reads those as off-target sites, and a good probe
+is rejected. Measured on real GENCODE v50 data, one footprint produced **70 raw
+pair sites which collapsed to 1, and that single "off-target gene" was the
+intended gene itself — verdict `fail`.** Naming the target gene excluded 140
+on-target hits and the same probe passed.
+
+```python
+screen_pair(left25, right25, backend=transcriptome, target_gene="MYGENE")
+```
+
+- The gene is parsed out of the reference name (`gencode_gene`, field 6 of a
+  pipe-delimited GENCODE header), and the parser is **detected from the names
+  that actually came back**. A plain chromosome FASTA has no gene field, so
+  `gene_aware` is `False` and a genome screen behaves exactly as before —
+  guarded by `TestGenomeScreensAreUnchanged`.
+- Site count and gene count are reported separately: 14 sites across 8 isoforms
+  of 2 genes is 2 problems, not 14. Read `offtarget_genes`.
+- Collapsing runs *after* the pair geometry, not before. The gap between the two
+  halves decides whether a site can signal, and that gap belongs to one
+  transcript's coordinates — two isoforms can place the same pads 1 nt apart in
+  one and 800 nt apart in the other, because an exon is spliced out of only one.
+  Collapsing first would have to pick a representative coordinate and would
+  silently invent or destroy sites.
+
+## RNA piFISH
+
+RNA targets are identified by accession, not coordinates, because a transcript is
+a molecule rather than an interval:
+
+```bash
+python -m mypibypy rna --loci loci.local.json -o rna_order.xlsx \
+    --transcriptome-index /path/to/gencode/transcripts
+```
+
+`sequence.fetch_transcript` dispatches on the accession prefix — Ensembl REST for
+`ENST`/`ENSMUST`, NCBI E-utilities for `NM_`/`NR_`/`XM_`/`XR_` — and validates
+what comes back, because a truncated response that still parses as sequence would
+silently shorten the transcript and shift every downstream offset:
+
+- Ensembl is asked for JSON rather than FASTA, so a partial body fails to parse
+  instead of becoming a short sequence. It needs an `Accept` header; sending
+  `Content-Type` returns 200 with an empty body.
+- RefSeq length is fetched independently via `esummary` and compared against the
+  downloaded sequence, since efetch FASTA carries no length.
+
+**Which reference an RNA design is screened against — transcriptome only, by
+default.** The transcriptome is the population of molecules actually present, and
+a footprint may legitimately span an exon-exon junction, which is often the point
+since it is what makes a probe isoform-specific. Such a footprint does not map
+contiguously to the genome at all: screened against one, its two halves land in
+different exons thousands of nt apart, the real on-target site is invisible, and
+the output is actively misleading. Genomic DNA is in the sample too, but a
+standard RNA-FISH protocol has no denaturation step, so that DNA stays
+double-stranded and a single-stranded probe cannot invade it. If your protocol
+*does* denature, pass `--also-genome-index`. See `pipeline.RNA_SCREEN_POLICY`.
+
+Note the co-localisation window is in **transcript** coordinates when screening a
+transcriptome: two half-sites 50 nt apart in a spliced mRNA may be far apart in
+the genome, and the spliced distance is the one that matters.
+
+`exon_boundaries` on an RNA target are optional 0-based transcript offsets. They
+are used only to *report* that a footprint spans a junction, and where —
+`junction_position` distinguishes a boundary landing on the 1-nt gap, where each
+pad lies wholly within one exon, from one landing mid-pad.
+
+Not yet addressed: mRNA secondary-structure accessibility, a genuinely RNA-only
+constraint. ViennaRNA is not in the conda environment and adding it was kept out
+of this work deliberately.
+
+### Behind a TLS-inspecting proxy
+
+If `curl` reaches these APIs but Python raises
+`CERTIFICATE_VERIFY_FAILED`, the proxy's root is in the macOS keychain but not in
+this interpreter's CA bundle. Export the system roots rather than disabling
+verification:
+
+```bash
+security find-certificate -a -p /System/Library/Keychains/SystemRootCertificates.keychain > roots.pem
+security find-certificate -a -p /Library/Keychains/System.keychain >> roots.pem
+export SSL_CERT_FILE=$PWD/roots.pem
+```
+
+The error message says this too. The same applies to the UCSC fetch used by
+genomic designs.
 
 ## Recording what happened
 

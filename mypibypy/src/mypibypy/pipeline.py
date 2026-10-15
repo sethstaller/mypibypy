@@ -21,9 +21,10 @@ from .design import (
     check_partner_specificity,
     fusion_footprint,
     scan,
+    scan_transcript,
 )
-from .loci import FusionJunction, Locus
-from .sequence import fetch_sequence, mask_repeats, rmsk_hits
+from .loci import FusionJunction, Locus, RnaTarget
+from .sequence import fetch_sequence, fetch_transcript, mask_repeats, rmsk_hits
 from .specificity import Backend, SpecificityReport, not_screened, screen_pair
 from .systems import AmplifierSystem, get_system
 
@@ -132,3 +133,77 @@ def design_fusion(junction: FusionJunction, backend=None, screen: bool = True,
         results.append(DesignResult(locus, pair.system, junction.sequence,
                                     [cand], pair, rmsk=[], specificity=spec))
     return results
+
+
+#: Which reference an RNA design is screened against, and why.
+#:
+#: TRANSCRIPTOME ONLY, by default. Two reasons, and the second is the one that
+#: decides it.
+#:
+#: 1. The transcriptome is the population of molecules actually present. An RNA
+#:    probe competes with every other transcript in the cell, which is precisely
+#:    what a transcriptome index represents and what a genome index does not: a
+#:    gene's expressed isoforms are separate molecules at separate abundances,
+#:    and a genome collapses them into one locus.
+#: 2. A footprint may legitimately span an exon-exon junction -- often the point,
+#:    since it is what makes a probe isoform-specific. Such a footprint does not
+#:    map contiguously to the genome at all. Screened against a genome its two
+#:    halves land in different exons, thousands of nt apart, so the real
+#:    on-target site is invisible and the output is actively misleading.
+#:
+#: Genomic DNA is in the sample too, but a standard RNA-FISH protocol has no
+#: denaturation step, so that DNA stays double-stranded and a single-stranded
+#: probe cannot invade it. If your protocol *does* denature -- a combined
+#: DNA/RNA experiment, for instance -- then the genome matters and you should
+#: screen against both: pass `also_genome_backend`. Doing so is not the default
+#: because for the usual protocol it adds a reference the probe never meets, and
+#: junction-spanning designs would be flagged for a geometry that is correct.
+RNA_SCREEN_POLICY = "transcriptome-only by default; see RNA_SCREEN_POLICY"
+
+
+def design_rna(target: RnaTarget, backend=None, screen: bool = True,
+               top: int = 5, transcript_seq: str | None = None,
+               also_genome_backend=None, **screen_kwargs) -> DesignResult:
+    """Design a split-probe pair against a transcript.
+
+    `backend` should index a TRANSCRIPTOME -- see `RNA_SCREEN_POLICY` for why,
+    and for when to also pass `also_genome_backend`.
+
+    The screen is given `target_gene`, so the probe's own gene is excluded
+    instead of being reported as an off-target in each of its isoforms. Note the
+    co-localisation window is in transcript coordinates here: two half-sites 50
+    nt apart in a spliced mRNA may be far apart in the genome, and the spliced
+    distance is the one that matters, because the spliced molecule is what the
+    probe binds.
+    """
+    system = get_system(target.system)
+    seq = transcript_seq if transcript_seq is not None else fetch_transcript(
+        target.accession)
+    cands = scan_transcript(seq, target.accession, top=top,
+                            scan_start=target.scan_start, scan_end=target.scan_end,
+                            exon_boundaries=target.exon_boundaries)
+    if not cands:
+        raise ValueError(f"no valid 51-nt window found in {target.accession}")
+    pair = build_pair(
+        target.name, system, cands[0],
+        p1l_name=f"P1L_{target.gene}_{target.name}",
+        p1r_name=f"P1R_{target.gene}_{target.name}",
+    )
+    locus = Locus(name=target.name, gene=target.gene,
+                  description=(target.description
+                               or f"RNA target on {target.accession}"),
+                  interval=cands[0].interval, system=system.name)
+    if screen:
+        spec = screen_pair(cands[0].left.seq, cands[0].right.seq, backend=backend,
+                           target_gene=target.gene, **screen_kwargs)
+        if also_genome_backend is not None:
+            genome = screen_pair(cands[0].left.seq, cands[0].right.seq,
+                                 backend=also_genome_backend, **screen_kwargs)
+            # Kept as a note rather than merged: the two screens answer different
+            # questions against different coordinate spaces, and averaging their
+            # verdicts would obscure both.
+            spec.reason = (spec.reason + " | additional genome screen: "
+                           + genome.summary()).strip(" |")
+    else:
+        spec = not_screened("genome screen skipped by request (screen=False)")
+    return DesignResult(locus, system, seq, cands, pair, rmsk=[], specificity=spec)

@@ -18,8 +18,15 @@ import argparse
 import re
 
 from .design import PADS_AS_ORDERED, PADS_DIRECT
-from .loci import Locus, is_example, load_fusions, load_loci, resolve_loci_path
-from .pipeline import design_fusion, design_locus
+from .loci import (
+    Locus,
+    is_example,
+    load_fusions,
+    load_loci,
+    load_rna_targets,
+    resolve_loci_path,
+)
+from .pipeline import design_fusion, design_locus, design_rna
 from .sequence import GenomicInterval
 from .specificity import SpecificityNotConfigured, resolve_backend
 from .systems import is_example as systems_are_example
@@ -111,6 +118,20 @@ def main(argv=None):
                         f"signal at the bench; they have not been compared")
     _specificity_options(f)
 
+    r = sub.add_parser("rna", help="design every RNA target in a loci file")
+    r.add_argument("--loci", help="path to a loci JSON file with an 'rna_targets' key")
+    r.add_argument("-o", "--out", required=True)
+    r.add_argument("--transcriptome-index",
+                   help="bowtie v1 index of a TRANSCRIPTOME (see pipeline."
+                        "RNA_SCREEN_POLICY for why this, not a genome)")
+    r.add_argument("--also-genome-index",
+                   help="additionally screen against a genome index. Only needed "
+                        "when the protocol denatures DNA; a standard RNA-FISH "
+                        "protocol does not, so genomic DNA stays double-stranded "
+                        "and the probe cannot invade it")
+    r.add_argument("--no-screen", action="store_true",
+                   help="skip the specificity screen entirely")
+
     d = sub.add_parser("design", help="design one locus given on the command line")
     d.add_argument("--build", required=True)
     d.add_argument("--region", required=True, help="chrom:start-end (1-based inclusive)")
@@ -122,7 +143,27 @@ def main(argv=None):
 
     args = ap.parse_args(argv)
 
-    if args.cmd == "fusion":
+    if args.cmd == "rna":
+        targets = load_rna_targets(args.loci)
+        if not targets:
+            raise SystemExit(
+                f"no RNA targets defined in {resolve_loci_path(args.loci)} "
+                "(add an 'rna_targets' key -- see loci.example.json)")
+        warnings = _warn_if_example(args.loci)
+        backend = genome_backend = None
+        if not args.no_screen:
+            try:
+                backend = resolve_backend(bowtie_index=args.transcriptome_index)
+            except SpecificityNotConfigured as exc:
+                print(f"WARNING: no transcriptome screen will be run -- {exc}")
+            if args.also_genome_index:
+                genome_backend = resolve_backend(bowtie_index=args.also_genome_index)
+        results = [design_rna(t, backend=backend, screen=not args.no_screen,
+                              also_genome_backend=genome_backend) for t in targets]
+        note = (f"mypibypy RNA design of {len(targets)} transcript target(s) from "
+                f"{resolve_loci_path(args.loci).name}. Screened against a "
+                f"transcriptome; see pipeline.RNA_SCREEN_POLICY.")
+    elif args.cmd == "fusion":
         fusions = load_fusions(args.loci)
         if not fusions:
             raise SystemExit(

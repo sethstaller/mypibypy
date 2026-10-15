@@ -7,10 +7,16 @@ from __future__ import annotations
 
 import json
 import math
+import ssl
+import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
 UCSC_API = "https://api.genome.ucsc.edu"
+ENSEMBL_REST = "https://rest.ensembl.org"
+NCBI_EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
 _COMPLEMENT = str.maketrans("ACGTacgtNn", "TGCAtgcaNn")
 
@@ -158,3 +164,181 @@ def mask_repeats(seq: str, interval: GenomicInterval, hits: list[dict]) -> str:
         for i in range(a, b):
             chars[i] = chars[i].lower()
     return "".join(chars)
+
+
+# --- Transcript sequence by accession --------------------------------------
+#
+# RNA piFISH targets a transcript, not an interval, so the input is an accession
+# rather than coordinates. Two sources, because the lab's records use both:
+# Ensembl/GENCODE ENST... and RefSeq NM_/NR_/XM_/XR_.
+#
+# Both fetchers validate what comes back. A truncated HTTP response that still
+# parses as sequence is the quiet failure here: it would silently shorten a
+# transcript, move every downstream offset, and design probes against the wrong
+# place. `fetch_sequence` checks the returned length against the interval it
+# asked for; these do the equivalent with what each API can tell us.
+
+_ENSEMBL_PREFIXES = ("ENST", "ENSMUST", "ENSG", "ENSMUSG")
+_REFSEQ_PREFIXES = ("NM_", "NR_", "XM_", "XR_", "NC_")
+
+
+class TranscriptFetchError(RuntimeError):
+    """A transcript could not be fetched, or what came back was not usable."""
+
+
+#: HTTP statuses worth retrying. Ensembl REST and NCBI E-utilities both emit
+#: transient 500s and rate-limit with 429 under normal use.
+_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+
+def _get(url: str, headers: dict | None = None, timeout: int = 30,
+         retries: int = 4) -> bytes:
+    """GET with retries on the transient statuses these services actually emit."""
+    req = urllib.request.Request(url, headers={"User-Agent": "mypibypy", **(headers or {})})
+    last: Exception | None = None
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as exc:
+            last = exc
+            if exc.code in _RETRY_STATUSES and attempt < retries - 1:
+                # Linear backoff. These are public shared services; retrying
+                # harder than this is rude and would not help anyway.
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise TranscriptFetchError(
+                f"{url} returned HTTP {exc.code}: {exc.reason}") from exc
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, ssl.SSLCertVerificationError):
+                # A TLS-inspecting proxy presents a root that is in the macOS
+                # keychain but not in this interpreter's CA bundle, so curl
+                # works and Python does not. Never paper over this by disabling
+                # verification -- point OpenSSL at the system roots instead.
+                raise TranscriptFetchError(
+                    f"TLS certificate verification failed for {url}. This usually "
+                    f"means a TLS-inspecting proxy whose root certificate is in "
+                    f"the system keychain but not in this interpreter's CA "
+                    f"bundle. Export the system roots and point OpenSSL at them:\n"
+                    f"  security find-certificate -a -p /System/Library/Keychains"
+                    f"/SystemRootCertificates.keychain > roots.pem\n"
+                    f"  security find-certificate -a -p /Library/Keychains"
+                    f"/System.keychain >> roots.pem\n"
+                    f"  export SSL_CERT_FILE=$PWD/roots.pem\n"
+                    f"Underlying error: {exc.reason}") from exc
+            last = exc
+            if attempt < retries - 1:
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise TranscriptFetchError(f"could not reach {url}: {exc.reason}") from exc
+    raise TranscriptFetchError(f"{url} failed after {retries} attempts: {last}")
+
+
+def _validate_sequence(seq: str, what: str) -> str:
+    seq = seq.strip().upper().replace("U", "T")
+    if not seq:
+        raise TranscriptFetchError(f"{what}: empty sequence returned")
+    bad = set(seq) - set("ACGTN")
+    if bad:
+        raise TranscriptFetchError(f"{what}: non-DNA characters {sorted(bad)[:5]}")
+    return seq
+
+
+def strip_version(accession: str) -> str:
+    """``NM_000546.6`` -> ``NM_000546``. Ensembl lookups want the unversioned ID."""
+    return accession.split(".", 1)[0]
+
+
+def fetch_ensembl_cdna(accession: str, timeout: int = 30) -> str:
+    """cDNA for an Ensembl transcript ID, via the Ensembl REST API.
+
+    JSON is requested rather than FASTA on purpose: a truncated JSON body fails
+    to parse, which turns a partial download into a loud error instead of a
+    short sequence. Note the API wants an ``Accept`` header -- sending
+    ``Content-Type`` instead returns 200 with an empty body, which is exactly
+    the silent failure worth avoiding.
+    """
+    ident = strip_version(accession)
+    url = f"{ENSEMBL_REST}/sequence/id/{ident}?type=cdna"
+    raw = _get(url, headers={"Accept": "application/json"}, timeout=timeout)
+    if not raw.strip():
+        raise TranscriptFetchError(
+            f"Ensembl returned an empty body for {accession} (url {url})")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise TranscriptFetchError(
+            f"Ensembl response for {accession} is not valid JSON, so it is "
+            f"probably truncated: {exc}") from exc
+    returned = str(data.get("id", ""))
+    if returned and strip_version(returned) != ident:
+        raise TranscriptFetchError(
+            f"asked Ensembl for {ident} and got {returned} back")
+    return _validate_sequence(str(data.get("seq", "")), f"Ensembl {accession}")
+
+
+def refseq_length(accession: str, timeout: int = 30) -> int | None:
+    """Recorded sequence length for a RefSeq accession, via esummary.
+
+    Fetched separately so the downloaded sequence can be checked against an
+    independently reported length. Returns None when esummary does not report
+    one, rather than inventing a number to compare against.
+    """
+    url = (f"{NCBI_EUTILS}/esummary.fcgi?db=nuccore&id="
+           f"{urllib.parse.quote(accession)}&retmode=json")
+    try:
+        data = json.loads(_get(url, timeout=timeout))
+    except json.JSONDecodeError:
+        return None
+    result = data.get("result", {})
+    for key, rec in result.items():
+        if key == "uids" or not isinstance(rec, dict):
+            continue
+        slen = rec.get("slen")
+        if isinstance(slen, int) and slen > 0:
+            return slen
+    return None
+
+
+def fetch_refseq_transcript(accession: str, timeout: int = 30) -> str:
+    """Sequence for a RefSeq accession, cross-checked against its recorded length.
+
+    efetch hands back FASTA with no length in it, so truncation is invisible
+    from the response alone. esummary reports the length independently, and the
+    two are compared -- which is the closest equivalent here to what
+    `fetch_sequence` does with an interval.
+    """
+    expected = refseq_length(accession, timeout=timeout)
+    url = (f"{NCBI_EUTILS}/efetch.fcgi?db=nuccore&id="
+           f"{urllib.parse.quote(accession)}&rettype=fasta&retmode=text")
+    text = _get(url, timeout=timeout).decode("utf-8", "replace")
+    lines = [ln.strip() for ln in text.splitlines()]
+    if not lines or not lines[0].startswith(">"):
+        raise TranscriptFetchError(
+            f"NCBI did not return FASTA for {accession}: {text[:120]!r}")
+    seq = _validate_sequence("".join(lines[1:]), f"RefSeq {accession}")
+    if expected is not None and len(seq) != expected:
+        raise TranscriptFetchError(
+            f"RefSeq {accession}: downloaded {len(seq)} nt but esummary reports "
+            f"{expected} nt -- the response is truncated or the accession is "
+            f"ambiguous; refusing to design against it")
+    return seq
+
+
+def fetch_transcript(accession: str, timeout: int = 30) -> str:
+    """Transcript sequence for an Ensembl or RefSeq accession.
+
+    Dispatches on the accession prefix. Raises `TranscriptFetchError` for an
+    unrecognised one rather than guessing a source, since guessing wrong returns
+    a plausible sequence for the wrong molecule.
+    """
+    acc = accession.strip()
+    upper = acc.upper()
+    if upper.startswith(_ENSEMBL_PREFIXES):
+        return fetch_ensembl_cdna(acc, timeout=timeout)
+    if upper.startswith(_REFSEQ_PREFIXES):
+        return fetch_refseq_transcript(acc, timeout=timeout)
+    raise TranscriptFetchError(
+        f"unrecognised accession {accession!r}: expected an Ensembl ID "
+        f"({'/'.join(_ENSEMBL_PREFIXES)}) or a RefSeq accession "
+        f"({'/'.join(_REFSEQ_PREFIXES)})")

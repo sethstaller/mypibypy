@@ -53,5 +53,26 @@
       "system_antisense": "cy3",
       "gap_side": "five_prime"
     }
+  ],
+  "_rna_comment": [
+    "EXAMPLE RNA TARGET. NM_000546 is human TP53 transcript variant 1 -- a",
+    "textbook public accession used purely so RNA mode runs out of the box.",
+    "It is not a lab target. 'accession' is fetched at runtime (Ensembl ENST",
+    "or RefSeq NM_/NR_/XM_), so no transcript sequence is stored here.",
+    "'exon_boundaries' are 0-based transcript offsets where an exon begins;",
+    "they are optional and only used to REPORT that a footprint spans a",
+    "junction, which is often desirable for isoform specificity."
+  ],
+  "rna_targets": [
+    {
+      "name": "cds_window",
+      "gene": "TP53",
+      "accession": "NM_000546.6",
+      "description": "example RNA target (public reference transcript, not a lab target)",
+      "system": "cy5",
+      "system_antisense": "cy3",
+      "scan_start": 200,
+      "scan_end": 1400
+    }
   ]
 }

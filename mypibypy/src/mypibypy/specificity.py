@@ -79,7 +79,7 @@ import os
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import thermo
@@ -149,6 +149,68 @@ class SpecificityNotConfigured(RuntimeError):
     """No local database/index is available to screen against."""
 
 
+# --- Reference names and genes ---------------------------------------------
+#
+# Screening a transcriptome is not screening a genome with longer names. A gene
+# appears once in a genome and ~8.5 times in GENCODE, so a probe against its own
+# target hits eight entries that are all the intended gene. Read as reference
+# sequences they look like eight off-target loci and the probe gets rejected.
+# The gene has to be recoverable from the reference name for that to be sorted
+# out, and for plain chromosome FASTAs it simply is not -- so this degrades to
+# "no gene information", and a genome screen behaves exactly as before.
+
+#: 1-indexed field holding the gene symbol in a GENCODE FASTA header:
+#: ENST|ENSG|OTTHUMG|OTTHUMT|transcript-name|GENE|length|biotype|
+GENCODE_GENE_SYMBOL_FIELD = 6
+#: 1-indexed field holding the stable gene ID, used when the symbol is absent.
+GENCODE_GENE_ID_FIELD = 2
+#: Minimum pipe-delimited fields before a name is treated as GENCODE-style.
+GENCODE_MIN_FIELDS = 6
+
+
+def gencode_gene(ref: str) -> str | None:
+    """Gene for a pipe-delimited GENCODE-style reference name, else None.
+
+    bowtie's SAM RNAME is the header up to the first whitespace, and GENCODE
+    headers contain no whitespace, so the whole pipe-delimited string arrives
+    intact and the gene is simply a field in it.
+
+    Prefers the symbol and falls back to the stable gene ID, because a few
+    entries carry "-" for the symbol. Returns None rather than guessing when the
+    name is not of this shape.
+    """
+    if "|" not in ref:
+        return None
+    fields = ref.split("|")
+    if len(fields) < GENCODE_MIN_FIELDS:
+        return None
+    symbol = fields[GENCODE_GENE_SYMBOL_FIELD - 1].strip()
+    if symbol and symbol != "-":
+        return symbol
+    gene_id = fields[GENCODE_GENE_ID_FIELD - 1].strip()
+    return gene_id or None
+
+
+def no_gene(ref: str) -> None:
+    """Gene resolver for references that carry none -- a plain chromosome FASTA."""
+    return None
+
+
+def detect_gene_parser(refs) -> "callable":
+    """Pick a gene resolver by looking at the reference names that came back.
+
+    Deliberately evidence-based rather than configured: the caller should not
+    have to declare what kind of database they pointed at, and getting that
+    declaration wrong is worse than detecting it. If any name parses as
+    GENCODE-style, the GENCODE parser is used; names that do not parse yield
+    None individually and are reported as ungrouped.
+    """
+    for ref in refs:
+        if gencode_gene(ref) is not None:
+            return gencode_gene
+    return no_gene
+
+
 # --- Hits ------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -166,6 +228,7 @@ class Hit:
     query_len: int
     q_start: int = 1    # 1-based inclusive, on the query
     q_end: int = 0      # 0 means "to the end of the query"
+    gene: str = ""      # "" when the reference carries no gene information
 
     @property
     def unaligned(self) -> int:
@@ -202,10 +265,19 @@ class Hit:
     def overlaps(self, iv: GenomicInterval) -> bool:
         return (self.chrom == iv.chrom and self.start <= iv.end and iv.start <= self.end)
 
+    @property
+    def locus_label(self) -> str:
+        """Gene when the reference has one, otherwise the reference name.
+
+        A GENCODE reference name is ~80 characters of pipe-delimited metadata;
+        printing it in a report is useless to a reader.
+        """
+        return self.gene or self.chrom
+
     def __str__(self) -> str:
         trim = f"+{self.unaligned}nt trimmed" if self.unaligned else "full-length"
-        return (f"{self.query} {self.chrom}:{self.start:,}-{self.end:,}({self.strand}) "
-                f"{self.mismatches}mm/{self.gaps}gap, {trim}")
+        return (f"{self.query} {self.locus_label}:{self.start:,}-{self.end:,}"
+                f"({self.strand}) {self.mismatches}mm/{self.gaps}gap, {trim}")
 
 
 @dataclass(frozen=True)
@@ -221,6 +293,11 @@ class PairSite:
     survives_wash: bool     # both duplexes predicted still bound after every step
     min_margin_c: float     # worst per-step Tm margin across both halves
     signal_gap_nt: int = DEFAULT_SIGNAL_GAP_NT
+    gene: str = ""      # "" when the reference carries no gene information
+
+    @property
+    def locus_label(self) -> str:
+        return self.gene or self.chrom
 
     @property
     def signal_capable(self) -> bool:
@@ -245,7 +322,7 @@ class PairSite:
     def __str__(self) -> str:
         kind = "SIGNAL-CAPABLE" if self.signal_capable else "co-localized"
         wash = "survives wash" if self.survives_wash else "melts in wash"
-        return (f"{kind} {self.chrom}:{min(self.left.start, self.right.start):,} "
+        return (f"{kind} {self.locus_label}:{min(self.left.start, self.right.start):,} "
                 f"gap {self.gap_nt} nt, {self.total_mismatches} mm total, "
                 f"{wash} (worst margin {self.min_margin_c:+.1f} C)")
 
@@ -423,22 +500,58 @@ def resolve_backend(bowtie_index: str | None = None, blast_db: str | None = None
         if not exe:
             problems.append(f"{tool} not on PATH")
             continue
-        if not _database_present(tool, db):
-            problems.append(f"{tool} database {db!r} not found")
+        problem = _database_problem(tool, db)
+        if problem:
+            problems.append(problem)
             continue
         return Backend(tool=tool, database=db, executable=exe,
                        max_mismatches=max_mismatches, threads=threads)
     raise SpecificityNotConfigured("; ".join(problems))
 
 
-def _database_present(tool: str, db: str) -> bool:
-    """Cheap existence check on an index/database basename."""
+def _database_problem(tool: str, db: str) -> str | None:
+    """Why this database is unusable, or None if it looks fine.
+
+    More than an existence check, because existence is not the failure that
+    bites. A `bowtie-build` still running has already created all six .ebwt
+    files, and bowtie will happily open the half-written index, exit 0 and
+    return nothing -- which is indistinguishable from a clean screen. That is
+    the one outcome this module exists to prevent, so the mirror index is
+    checked for completeness too.
+
+    The check is structural: the forward and mirror indices cover the same
+    sequence, so .1/.rev.1 and .2/.rev.2 come out byte-identical in size. That
+    is an observed invariant of bowtie v1 output rather than a documented
+    guarantee -- verified against two complete indices and one mid-build -- so
+    it is reported as "looks incomplete", not asserted as proof.
+    """
     p = Path(db)
-    if tool == "bowtie":
-        return bool(list(p.parent.glob(p.name + "*.ebwt"))
-                    or list(p.parent.glob(p.name + "*.ebwtl")))
-    return bool(list(p.parent.glob(p.name + ".n*"))
-                or list(p.parent.glob(p.name + ".*.n*")))
+    if tool != "bowtie":
+        if (list(p.parent.glob(p.name + ".n*"))
+                or list(p.parent.glob(p.name + ".*.n*"))):
+            return None
+        return f"blastn database {db!r} not found"
+
+    suffix = ".ebwtl" if list(p.parent.glob(p.name + "*.ebwtl")) else ".ebwt"
+    required = [f"{p.name}.{n}{suffix}" for n in ("1", "2", "3", "4")]
+    required += [f"{p.name}.rev.{n}{suffix}" for n in ("1", "2")]
+    missing = [f for f in required if not (p.parent / f).is_file()]
+    if len(missing) == len(required):
+        return f"bowtie index {db!r} not found"
+    if missing:
+        return (f"bowtie index {db!r} is incomplete -- missing {missing}. "
+                f"If bowtie-build is still running, wait for it to finish; a "
+                f"partial index can return no hits and look like a clean screen")
+    for fwd, rev in (("1", "rev.1"), ("2", "rev.2")):
+        a = (p.parent / f"{p.name}.{fwd}{suffix}").stat().st_size
+        b = (p.parent / f"{p.name}.{rev}{suffix}").stat().st_size
+        if a != b:
+            return (f"bowtie index {db!r} looks incomplete: {p.name}.{rev}{suffix} "
+                    f"is {b:,} bytes against {a:,} for {p.name}.{fwd}{suffix}, so the "
+                    f"mirror index is probably still being written. A partial index "
+                    f"can return no hits and look like a clean screen -- refusing "
+                    f"to screen against it")
+    return None
 
 
 # --- Pairing ---------------------------------------------------------------
@@ -510,11 +623,44 @@ def pair_hits(left_hits: list[Hit], right_hits: list[Hit], left_seq: str,
                 chrom=lh.chrom, left=lh, right=rh, gap_nt=gap,
                 same_strand=lh.strand == rh.strand, correct_order=correct_order,
                 survives_wash=l_ok and r_ok, min_margin_c=min(l_margin, r_margin),
-                signal_gap_nt=signal_gap_nt,
+                signal_gap_nt=signal_gap_nt, gene=lh.gene or rh.gene,
             ))
     sites.sort(key=lambda s: (not s.signal_capable, not s.survives_wash,
                               s.total_mismatches))
     return sites
+
+
+def collapse_sites_by_gene(sites: list[PairSite]) -> list[PairSite]:
+    """One representative site per gene per distinct geometry.
+
+    WHY THIS RUNS AFTER THE PAIR GEOMETRY AND NOT BEFORE. The obvious move is to
+    collapse hits to genes first and pair the genes, which would also be ~8x less
+    work. It is wrong: the gap between the two halves is what decides whether a
+    site can signal, and that gap is a property of one transcript's coordinates.
+    Two isoforms of a gene can place the same pair of pads 1 nt apart in one and
+    800 nt apart in the other, because an intervening exon is spliced out of
+    only one of them. Collapsing before the geometry would have to pick a
+    representative coordinate and would silently invent or destroy sites.
+
+    So the geometry runs per reference sequence, as it must, and the redundancy
+    is removed here: isoforms of one gene that yield the same geometry collapse
+    to one site, and a genuinely different geometry in another isoform survives
+    as its own site. Sites with no gene information are never merged, since
+    without a gene there is nothing to merge on.
+    """
+    out: list[PairSite] = []
+    seen: set[tuple] = set()
+    for site in sites:
+        if not site.gene:
+            out.append(site)
+            continue
+        key = (site.gene, site.gap_nt, site.same_strand, site.correct_order,
+               site.left.mismatches, site.right.mismatches, site.survives_wash)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(site)
+    return out
 
 
 # --- Report ----------------------------------------------------------------
@@ -535,6 +681,10 @@ class SpecificityReport:
     n_dropped_mismatch: int = 0  # over the mismatch budget
     left_seq: str = ""
     right_seq: str = ""
+    target_gene: str = ""        # the intended gene, when screening a transcriptome
+    gene_aware: bool = False     # did the reference carry parseable gene names?
+    on_target_gene_hits: int = 0  # hits to the intended gene, excluded from pairing
+    n_sites_before_collapse: int = 0
     left_hits: list[Hit] = field(default_factory=list)
     right_hits: list[Hit] = field(default_factory=list)
     pair_sites: list[PairSite] = field(default_factory=list)
@@ -548,6 +698,17 @@ class SpecificityReport:
     @property
     def surviving_sites(self) -> list[PairSite]:
         return [s for s in self.pair_sites if s.survives_wash]
+
+    @property
+    def offtarget_genes(self) -> list[str]:
+        """Distinct genes carrying at least one signal-capable, surviving site.
+
+        This is the number to read on a transcriptome screen. "14 sites" across
+        8 isoforms of 2 genes is 2 problems, not 14.
+        """
+        genes = {s.gene for s in self.pair_sites
+                 if s.gene and s.signal_capable and s.survives_wash}
+        return sorted(genes)
 
     @property
     def signal_capable_sites(self) -> list[PairSite]:
@@ -612,16 +773,34 @@ class SpecificityReport:
         n_surv = len(self.surviving_sites)
         n_cap = len([s for s in self.pair_sites
                      if s.signal_capable and s.survives_wash])
-        return (
+        text = (
             f"{self.backend}: {len(self.left_hits)} left / {len(self.right_hits)} right "
             f"half-hits at <={self.max_mismatches} mismatches; "
             f"{len(self.pair_sites)} off-target site(s) with both halves within "
             f"{self.window_nt} nt, of which {n_surv} predicted to survive the wash "
-            f"and {n_cap} close enough and oriented to reconstitute the P2 site "
-            f"-- verdict {self.verdict} "
+            f"and {n_cap} close enough and oriented to reconstitute the P2 site"
+        )
+        if self.gene_aware:
+            # Site count is per transcript and inflates with isoform number;
+            # gene count is the thing a reader should act on.
+            genes = self.offtarget_genes
+            text += (
+                f" across {len(genes)} off-target gene(s)"
+                + (f" ({', '.join(genes[:6])}{'...' if len(genes) > 6 else ''})"
+                   if genes else "")
+            )
+            if self.target_gene:
+                text += (f"; {self.on_target_gene_hits} hit(s) to the intended gene "
+                         f"{self.target_gene} were excluded as on-target")
+            if self.n_sites_before_collapse > len(self.pair_sites):
+                text += (f"; {self.n_sites_before_collapse} raw sites collapsed to "
+                         f"{len(self.pair_sites)} by gene and geometry")
+        text += (
+            f" -- verdict {self.verdict} "
             f"[{self.n_raw_hits} raw alignments; {self.n_dropped_mismatch} over "
             f"budget, {self.n_dropped_short} shorter than {self.min_aligned_nt} nt]"
         )
+        return text
 
     def to_dict(self) -> dict:
         return {
@@ -642,6 +821,12 @@ class SpecificityReport:
             "n_dropped_mismatch": self.n_dropped_mismatch,
             "min_aligned_nt": self.min_aligned_nt,
             "n_signal_capable_sites": len(self.signal_capable_sites),
+            "gene_aware": self.gene_aware,
+            "target_gene": self.target_gene,
+            "offtarget_genes": self.offtarget_genes,
+            "n_offtarget_genes": len(self.offtarget_genes),
+            "on_target_gene_hits": self.on_target_gene_hits,
+            "n_sites_before_collapse": self.n_sites_before_collapse,
             "score": self.score,
             "verdict": self.verdict,
             "sites": [str(s) for s in self.pair_sites],
@@ -656,6 +841,7 @@ def not_screened(reason: str) -> SpecificityReport:
 
 def screen_pair(left_seq: str, right_seq: str, backend: Backend | None = None,
                 on_target: GenomicInterval | None = None,
+                target_gene: str | None = None,
                 window_nt: int = DEFAULT_WINDOW_NT,
                 max_mismatches: int = DEFAULT_MAX_MISMATCHES,
                 signal_gap_nt: int = DEFAULT_SIGNAL_GAP_NT,
@@ -670,7 +856,16 @@ def screen_pair(left_seq: str, right_seq: str, backend: Backend | None = None,
     the synthesized probes -- the arms are constant and belong to `crosshyb`.
 
     `on_target` is the intended footprint; hits overlapping it are dropped so the
-    design does not flag itself.
+    design does not flag itself. It is a coordinate interval, which is the right
+    tool for a genome and useless for a transcriptome: the intended gene appears
+    in every one of its isoforms at a different offset, and no single interval
+    covers them.
+
+    `target_gene` is the transcriptome equivalent -- hits to that gene are
+    excluded from the pairing step and counted separately. Without it, a probe
+    screened against GENCODE finds its own target in ~8 isoforms, pairs them up,
+    and reports its own gene as eight off-target sites. Matching is on the gene
+    field parsed out of the reference name, case-insensitively.
     """
     if backend is None:
         try:
@@ -679,6 +874,21 @@ def screen_pair(left_seq: str, right_seq: str, backend: Backend | None = None,
             return not_screened(str(exc))
 
     queries = {"left": left_seq.upper(), "right": right_seq.upper()}
+    # An empty or stub query returns no alignments and would render as a clean
+    # screen. Refuse it loudly instead -- found the hard way, by handing this a
+    # footprint sliced past the end of a transcript.
+    for name, q in queries.items():
+        if len(q) < min_aligned_nt:
+            return SpecificityReport(
+                status=ERROR, backend=backend.describe(), database=backend.database,
+                reason=(f"{name} query is {len(q)} nt, below the {min_aligned_nt} nt "
+                        f"minimum; a short or empty query returns no hits and would "
+                        f"look like a clean screen"))
+        bad = set(q) - set("ACGTN")
+        if bad:
+            return SpecificityReport(
+                status=ERROR, backend=backend.describe(), database=backend.database,
+                reason=f"{name} query has non-DNA characters {sorted(bad)}")
     try:
         hits = backend.search(queries)
     except (RuntimeError, OSError) as exc:
@@ -696,12 +906,33 @@ def screen_pair(left_seq: str, right_seq: str, backend: Backend | None = None,
     n_dropped_short = len(kept) - len(long_enough)
     if on_target is not None:
         long_enough = [h for h in long_enough if not h.overlaps(on_target)]
+
+    # Attach the gene to every hit, if the reference names carry one. Detection
+    # is from the names that actually came back, so a plain chromosome FASTA
+    # yields no genes and everything below is a no-op -- a genome screen behaves
+    # exactly as it did before gene awareness existed.
+    gene_of = detect_gene_parser(h.chrom for h in long_enough)
+    gene_aware = gene_of is not no_gene
+    if gene_aware:
+        long_enough = [replace(h, gene=gene_of(h.chrom) or "") for h in long_enough]
+
+    # Exclude the intended gene before pairing. This is the step that stops a
+    # good probe being rejected for hitting its own target's other isoforms.
+    on_target_gene_hits = 0
+    if target_gene and gene_aware:
+        wanted = target_gene.strip().lower()
+        on_target_gene_hits = sum(1 for h in long_enough if h.gene.lower() == wanted)
+        long_enough = [h for h in long_enough if h.gene.lower() != wanted]
+
     left_hits = [h for h in long_enough if h.query == "left"]
     right_hits = [h for h in long_enough if h.query == "right"]
 
     sites = pair_hits(left_hits, right_hits, left_seq, right_seq,
                       window_nt=window_nt, signal_gap_nt=signal_gap_nt,
                       steps=steps, penalty_c=penalty_c)
+    n_before_collapse = len(sites)
+    if gene_aware:
+        sites = collapse_sites_by_gene(sites)
     return SpecificityReport(
         status=SCREENED, backend=backend.describe(), database=backend.database,
         max_mismatches=max_mismatches, window_nt=window_nt,
@@ -709,5 +940,7 @@ def screen_pair(left_seq: str, right_seq: str, backend: Backend | None = None,
         n_dropped_short=n_dropped_short, n_dropped_mismatch=n_dropped_mismatch,
         left_seq=queries["left"], right_seq=queries["right"],
         left_hits=left_hits, right_hits=right_hits, pair_sites=sites,
-        on_target=on_target,
+        on_target=on_target, target_gene=target_gene or "", gene_aware=gene_aware,
+        on_target_gene_hits=on_target_gene_hits,
+        n_sites_before_collapse=n_before_collapse,
     )

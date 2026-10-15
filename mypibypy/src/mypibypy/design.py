@@ -445,3 +445,71 @@ def verify_against(built: list[ProbePair], ordered: dict[str, str]) -> list[dict
                 row["note"] = f"length differs by {len(seq) - len(want):+d} nt"
         rows.append(row)
     return rows
+
+
+# --- RNA targets -----------------------------------------------------------
+
+def spans_junction(offset: int, exon_boundaries) -> int | None:
+    """The exon boundary a 51-nt footprint at `offset` crosses, if any.
+
+    Returns the boundary offset, or None. Reported, never forbidden: a
+    junction-spanning footprint is frequently the point -- it is what makes a
+    probe isoform-specific rather than accidental.
+    """
+    for b in exon_boundaries:
+        if offset < b < offset + FOOTPRINT:
+            return b
+    return None
+
+
+def junction_position(offset: int, boundary: int) -> str:
+    """Where in the footprint a crossed boundary falls, for reporting.
+
+    Worth distinguishing, because a boundary landing on the 1-nt gap is the
+    cleanest case -- each pad then lies wholly within one exon, exactly the
+    fusion-junction geometry applied to splicing -- while one landing mid-pad
+    means that pad straddles the junction and will not bind an unspliced or
+    alternatively spliced molecule.
+    """
+    rel = boundary - offset
+    if rel == LEFT_LEN:
+        return "on the 1-nt gap (each pad lies wholly within one exon)"
+    if rel < LEFT_LEN:
+        return f"inside the left pad, {rel} nt from its 5' end"
+    return f"inside the right pad, {rel - LEFT_LEN - GAP_LEN} nt from its 5' end"
+
+
+def scan_transcript(transcript_seq: str, accession: str, top: int = 5,
+                    scan_start: int = 0, scan_end: int = 0,
+                    exon_boundaries=()) -> list[Candidate]:
+    """Rank 51-nt footprints within a transcript.
+
+    Identical window scoring to `scan`; what differs is the coordinate space.
+    Positions are offsets into the transcript, recorded on a `GenomicInterval`
+    whose build is the accession and whose "chromosome" is the literal string
+    "transcript", so nothing downstream mistakes these for genome coordinates.
+
+    Candidates crossing an exon boundary are flagged with where the boundary
+    falls -- see `junction_position`. The flag is informational.
+    """
+    end = scan_end or len(transcript_seq)
+    region = transcript_seq[scan_start:end]
+    if len(region) < FOOTPRINT:
+        raise ValueError(
+            f"{accession}: scan region is {len(region)} nt, need at least {FOOTPRINT}")
+    iv = GenomicInterval(accession, "transcript", scan_start + 1, end)
+    cands = scan(region, iv, top=len(region))  # score everything, trim after flagging
+    out = []
+    for c in cands:
+        absolute = scan_start + c.offset
+        boundary = spans_junction(absolute, exon_boundaries)
+        flags = list(c.flags)
+        if boundary is not None:
+            flags.append(f"spans exon junction at {boundary}: "
+                         f"{junction_position(absolute, boundary)}")
+        out.append(replace(
+            c, offset=absolute, flags=flags,
+            interval=GenomicInterval(accession, "transcript",
+                                     absolute + 1, absolute + FOOTPRINT),
+        ))
+    return out[:top]

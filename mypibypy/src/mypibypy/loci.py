@@ -14,6 +14,15 @@ Create your own from the shipped example:
 
     cp loci.example.json loci.local.json
 
+RNA targets live under an ``"rna_targets"`` key and are identified by accession,
+since a transcript is a molecule rather than an interval:
+
+    {"rna_targets": [
+      {"name": "cds", "gene": "GENEA", "accession": "NM_000546.6",
+       "system": "cy5", "system_antisense": "cy3",
+       "exon_boundaries": [120, 400, 910]}
+    ]}
+
 Fusion junctions live in the same file under a ``"fusions"`` key. A junction is
 not a genomic interval -- it is a sequence that exists only in the sample -- so
 it is supplied as sequence plus a breakpoint offset rather than coordinates:
@@ -216,3 +225,77 @@ def load_fusions(path: str | Path | None = None) -> list[FusionJunction]:
     if not isinstance(entries, list):
         raise LociNotConfigured(f"{src}: 'fusions' must be a list")
     return [_fusion_from_dict(d, src) for d in entries]
+
+
+# --- RNA targets -----------------------------------------------------------
+
+@dataclass(frozen=True)
+class RnaTarget:
+    """A transcript to probe, identified by accession rather than coordinates.
+
+    `exon_boundaries` are 0-based offsets into the transcript at which a new exon
+    begins, when they are known. They are optional and purely informational: a
+    footprint spanning one is often *desirable* for isoform specificity, so this
+    exists to report what a design does, not to forbid anything. Leave it empty
+    and junction-spanning simply goes unreported.
+
+    `scan_start` / `scan_end` restrict probe placement to part of the transcript
+    (0-based, end-exclusive; `scan_end` of 0 means "to the end").
+    """
+
+    name: str
+    gene: str
+    accession: str
+    system: str
+    system_antisense: str | None = None
+    description: str = ""
+    exon_boundaries: tuple[int, ...] = ()
+    scan_start: int = 0
+    scan_end: int = 0
+
+    @property
+    def antisense_system(self) -> str:
+        return self.system_antisense or self.system
+
+    def __str__(self) -> str:
+        return f"{self.gene} ({self.accession}), target {self.name}"
+
+
+def _rna_from_dict(d: dict, src: Path) -> RnaTarget:
+    missing = {"name", "gene", "accession", "system"} - set(d)
+    if missing:
+        raise LociNotConfigured(
+            f"{src}: RNA target {d.get('name', '?')!r} missing {sorted(missing)}")
+    try:
+        boundaries = tuple(int(b) for b in d.get("exon_boundaries", ()))
+    except (TypeError, ValueError) as exc:
+        raise LociNotConfigured(
+            f"{src}: RNA target {d['name']!r} has non-integer exon_boundaries") from exc
+    if any(b < 0 for b in boundaries):
+        raise LociNotConfigured(
+            f"{src}: RNA target {d['name']!r} has a negative exon boundary")
+    start, end = int(d.get("scan_start", 0)), int(d.get("scan_end", 0))
+    if end and end <= start:
+        raise LociNotConfigured(
+            f"{src}: RNA target {d['name']!r} has scan_end <= scan_start")
+    return RnaTarget(
+        name=str(d["name"]), gene=str(d["gene"]), accession=str(d["accession"]),
+        system=str(d["system"]), system_antisense=d.get("system_antisense"),
+        description=str(d.get("description", "")),
+        exon_boundaries=tuple(sorted(boundaries)), scan_start=start, scan_end=end,
+    )
+
+
+def load_rna_targets(path: str | Path | None = None) -> list[RnaTarget]:
+    """Load RNA targets from the ``rna_targets`` key. [] when none are defined."""
+    src = resolve_loci_path(path)
+    try:
+        raw = json.loads(src.read_text())
+    except json.JSONDecodeError as exc:
+        raise LociNotConfigured(f"{src} is not valid JSON: {exc}") from exc
+    entries = raw.get("rna_targets") if isinstance(raw, dict) else None
+    if not entries:
+        return []
+    if not isinstance(entries, list):
+        raise LociNotConfigured(f"{src}: 'rna_targets' must be a list")
+    return [_rna_from_dict(d, src) for d in entries]

@@ -28,6 +28,8 @@ cd mypibypy && pip install -e . && pytest
 ```bash
 python -m mypibypy batch  --loci loci.local.json -o order.xlsx
 python -m mypibypy fusion --loci loci.local.json -o fusion_order.xlsx
+python -m mypibypy rna    --loci loci.local.json -o rna_order.xlsx \
+    --transcriptome-index /path/to/gencode/transcripts
 ```
 
 ## What is in here
@@ -36,7 +38,7 @@ python -m mypibypy fusion --loci loci.local.json -o fusion_order.xlsx
 |---|---|
 | [`mypibypy/`](mypibypy/) | the package, its tests, and [the real README](mypibypy/README.md) |
 | [`mypibypy/src/mypibypy/`](mypibypy/src/mypibypy/) | design, screening and workbook modules |
-| [`mypibypy/tests/`](mypibypy/tests/) | 158 tests; the aligner-backed ones skip without blast/bowtie |
+| [`mypibypy/tests/`](mypibypy/tests/) | 217 tests; aligner- and network-backed ones skip when unavailable |
 | [`mypibypy/scripts/`](mypibypy/scripts/) | threshold calibration and backend sensitivity benchmarks |
 
 ## No sequences in this repository
@@ -66,7 +68,9 @@ order workbook prints verbatim. Gate any specificity claim on
 recruit P2 and so cannot make a spot; two hits landing adjacent can. No
 general-purpose probe tool draws that distinction, and it is the main reason this
 package exists. See
-[Pair-aware genome screening](mypibypy/README.md#pair-aware-genome-screening).
+[Pair-aware genome screening](mypibypy/README.md#pair-aware-genome-screening),
+and [gene-level collapsing](mypibypy/README.md#screening-a-transcriptome-gene-level-collapsing)
+for why a transcriptome needs more than that.
 
 ## Credit and license
 
