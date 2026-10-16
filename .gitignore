@@ -39,8 +39,10 @@ loci.local.json
 *.xlsx
 designs/
 
-# Design-to-result records: contain real probe sequences (see src/mypibypy/outcomes.py)
+# Design-to-result records and agent run records: both quote real probe
+# sequences (see src/mypibypy/outcomes.py and src/mypibypy/agent/record.py)
 outcomes.local.jsonl
+agent_runs.local.jsonl
 *.local.jsonl
 
 # Decoy databases built by scripts/benchmark_specificity.py

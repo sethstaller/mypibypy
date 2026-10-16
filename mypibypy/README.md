@@ -74,7 +74,7 @@ pip install -e .          # from this directory
 Then configure your amplifier systems (see below) and run the tests:
 
 ```bash
-pytest                    # 273 tests, no PYTHONPATH needed
+pytest                    # 334 tests, no PYTHONPATH needed
 ```
 
 ## Usage
@@ -133,6 +133,7 @@ example systems or example loci are in use -- those outputs are not orderable.
 | `thermo.py`      | buffer-aware Tm and wash-survival margins                        |
 | `accessibility.py` | RNA target-site secondary structure (RNAplfold)                |
 | `outcomes.py`    | design → imaging-result record, for calibrating thresholds later |
+| `agent/`         | the agent loop: closed actions, bounds, budgets, run record      |
 | `workbook.py`    | render the order workbook (ORDER_ssDNA / Parts list / per-locus) |
 | `cli.py`         | `python -m mypibypy`                                             |
 
@@ -372,6 +373,79 @@ python -m mypibypy rna   --loci loci.local.json -o rna.xlsx   --pairs 10 \
   pre-change snapshot, not assumed. A tiled locus sheet becomes a table with one
   row per pair, and the REUSED amplifier count does not grow with pair count,
   which is the whole point of tiling into an existing pool.
+
+## The agent layer
+
+Terms, in the lab's own framing: the **model** is stateless text in, text out;
+the **harness** is the code around it — schema, state, routing, retries, calls
+into deterministic tools; an **agent** is a harness where the model's output
+decides the next step. The pipeline was built first and works without any of
+this.
+
+**The model is reserved for conflicts.** A deterministic classifier runs first
+and sorts every evaluation into `CLEAR_PASS`, `CLEAR_FAIL`, or
+`NEEDS_JUDGEMENT`; only the last consults a model. A lone-arm off-target hit
+whose partner arm has nothing nearby cannot recruit P2 and so cannot make a
+spot — that is geometry, already coded, and routing it through a language model
+would add cost, latency and a chance of a confident wrong answer for no gain.
+What genuinely needs judgement is: nothing passed and some constraint must give;
+one arm matching several paralogous loci while its partner matches none; or
+accessibility and specificity pointing in opposite directions.
+
+Six things are load-bearing:
+
+1. **The model never writes or edits a sequence.** No tool accepts one, its
+   output schema has no field that could carry one, and an unexpected key is
+   refused rather than ignored. Enforced by
+   `tools.sequence_accepting_tools()` and tested structurally, not by prompt
+   discipline.
+2. **The action set is closed** — nine actions, enforced by structured output
+   (`output_config.format`, a JSON-schema enum), not parsed out of prose.
+3. **The model picks *which* constraint gives; the code decides *by how much*.**
+   Step sizes live in `actions.STEPS`. The model supplies no numbers at all.
+4. **Parameter bounds are code.** Out-of-range values are clamped and the clamp
+   is recorded; an unknown system is refused outright, because there is no
+   nearest valid channel and guessing orders the wrong dye.
+5. **A durable run record.** Every tool call, clamp and decision, with the
+   evidence it was made on, appended to a gitignored JSONL.
+   `record.explain()` renders it as prose for the question "why this probe".
+6. **Hard budgets.** Turns, model calls, tokens, and at most **three
+   relaxations** — then the run reports failure rather than loosening until
+   something passes, which is how a loop comes to "succeed" every time.
+
+Degradation is a branch, not a crash: no model configured, a refusal, or an API
+error all flag the run for human review rather than proceeding.
+`stop_reason == "refusal"` is checked **before** the response content is read,
+and server-side fallback is opted into — routine probe design sits close enough
+to the biology classifier's territory that refusals must be handled normally.
+
+The endpoint is swappable: `DecisionClient` is a protocol, `base_url` is passed
+through for an Anthropic-compatible gateway, and a local model speaking another
+protocol needs only its own `DecisionClient`.
+
+### Validation against the verified designs
+
+The check that matters is whether the loop reaches the *same* conclusions a
+human already reached. `scripts/validate_agent.py` runs the verified designs
+through it and compares:
+
+| design | agrees | status | model calls | relaxations |
+|---|---|---|---|---|
+| genomic (hg38) | yes | succeeded | 0 | 0 |
+| fusion #1 | yes | succeeded | 0 | 0 |
+| fusion #2 | yes | succeeded | 1 | 0 |
+
+Same footprint and same primaries in all three. Two needed no model at all;
+the third consulted it because its deterministic screen verdict is `review`
+rather than `pass`, which is a genuine judgement case being correctly routed.
+
+That comparison earned its keep immediately. The first version of the agent
+imposed a hard GC/Tm window by default and **disagreed with every verified
+design** — at one real locus, zero of 1692 windows satisfy GC 0.40–0.60 and Tm
+55–62, yet the locus has a working validated design, because `design._score`
+penalises GC/Tm distance and never rejects on it. Hard windows are now opt-in
+(`enforce_window`), so the default reproduces the verified path exactly and the
+loop only relaxes a constraint someone actually imposed.
 
 ## Recording what happened
 

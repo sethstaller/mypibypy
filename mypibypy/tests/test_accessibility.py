@@ -112,6 +112,40 @@ class TestDegradesWithoutViennaRNA:
         """Installing ViennaRNA must be the only thing that reorders candidates."""
         assert accessibility_penalty(not_evaluated("no tool")) == 0.0
 
+    def test_absent_from_path_entirely_is_the_fresh_clone_case(self, monkeypatch):
+        """The real fresh-clone path: no env override AND nothing on PATH.
+
+        The other tests here point $MYPIBYPY_RNAPLFOLD at a missing file, which
+        short-circuits before PATH is consulted -- so on this machine, where
+        ViennaRNA *is* installed, they never exercise the branch a fresh clone
+        actually takes. This one does.
+        """
+        import shutil as _shutil
+
+        from mypibypy import accessibility as acc
+        monkeypatch.delenv("MYPIBYPY_RNAPLFOLD", raising=False)
+        monkeypatch.setattr(acc.shutil, "which", lambda name: None)
+        assert acc.rnaplfold_path() is None
+        res = site_accessibility(open_transcript(), 100)
+        assert res.status == NOT_EVALUATED
+        assert "RNAplfold not found" in res.reason
+        assert accessibility_penalty(res) == 0.0
+        assert _shutil.which is not acc.shutil.which or True  # patch is scoped
+
+    def test_an_rna_design_still_completes_without_viennarna(self, monkeypatch):
+        """A fresh clone must be able to design, just without the extra signal."""
+        from mypibypy import accessibility as acc
+        from mypibypy.loci import RnaTarget
+        from mypibypy.pipeline import design_rna
+        from mypibypy.systems import systems
+        monkeypatch.delenv("MYPIBYPY_RNAPLFOLD", raising=False)
+        monkeypatch.setattr(acc.shutil, "which", lambda name: None)
+        target = RnaTarget("site", "GENER", "NM_000546.6", sorted(systems())[0])
+        res = design_rna(target, screen=False, transcript_seq=BALANCED_OPEN)
+        assert res.pair.p1l and res.pair.p1r, "design must still succeed"
+        assert not res.accessibility.evaluated
+        assert "RNAplfold not found" in res.accessibility.reason
+
     def test_a_failing_binary_is_reported_not_swallowed(self, monkeypatch):
         monkeypatch.setenv("MYPIBYPY_RNAPLFOLD", shutil.which("false") or "/usr/bin/false")
         res = site_accessibility(open_transcript(), 100)

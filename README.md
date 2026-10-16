@@ -39,7 +39,7 @@ python -m mypibypy batch  --loci loci.local.json -o order.xlsx --pairs 6
 |---|---|
 | [`mypibypy/`](mypibypy/) | the package, its tests, and [the real README](mypibypy/README.md) |
 | [`mypibypy/src/mypibypy/`](mypibypy/src/mypibypy/) | design, screening and workbook modules |
-| [`mypibypy/tests/`](mypibypy/tests/) | 273 tests; aligner-, folding- and network-backed ones skip when unavailable |
+| [`mypibypy/tests/`](mypibypy/tests/) | 334 tests; aligner-, folding- and network-backed ones skip when unavailable. No test makes an API call |
 | [`mypibypy/scripts/`](mypibypy/scripts/) | threshold calibration and backend sensitivity benchmarks |
 
 ## No sequences in this repository
