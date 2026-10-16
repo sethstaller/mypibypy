@@ -38,6 +38,7 @@ from mypibypy.agent import (  # noqa: E402
     DesignParameters,
     ScriptedClient,
     Situation,
+    build_client,
 )
 from mypibypy.agent.loop import classify  # noqa: E402
 from mypibypy.agent.tools import filter_candidates, window_stats  # noqa: E402
@@ -47,6 +48,26 @@ from mypibypy.pipeline import DesignResult, design_locus  # noqa: E402
 from mypibypy.sequence import fetch_sequence, mask_repeats, rmsk_hits  # noqa: E402
 from mypibypy.specificity import Backend, not_screened, screen_pair  # noqa: E402
 from mypibypy.systems import get_system, systems  # noqa: E402
+
+
+#: Which agent statuses faithfully match a given deterministic verdict.
+#:
+#: Agreement is not "the agent said succeeded". A design whose deterministic
+#: screen verdict is `review` is one a human was told to look at, so an agent
+#: that flags it for review has reached the SAME conclusion -- and an agent that
+#: sails past it with `proceed` has not. An earlier version of this script
+#: scored only `succeeded` as agreement, which made a scripted `proceed` look
+#: like a match and a faithful `flag_for_review` look like a disagreement.
+CONSISTENT = {
+    "pass": {"succeeded"},
+    "review": {"succeeded", "flagged"},
+    "fail": {"failed", "flagged"},
+    "not screened": {"flagged", "failed"},
+}
+
+
+def statuses_consistent(verdict: str, status: str) -> bool:
+    return status in CONSISTENT.get(verdict, {"succeeded", "flagged", "failed"})
 
 
 def backend_or_none(index: str | None):
@@ -61,8 +82,11 @@ def backend_or_none(index: str | None):
 
 # --- genomic locus ---------------------------------------------------------
 
-def validate_locus(locus, label: str, backend, params: DesignParameters) -> dict:
+def validate_locus(locus, label: str, backend, params: DesignParameters,
+                   client=None) -> dict:
     """Deterministic design vs agent run, for one genomic locus."""
+    import time as _time
+    _t0 = _time.time()
     print(f"\n=== {label} (genomic) ===")
 
     # 1. The answer of record.
@@ -97,7 +121,7 @@ def validate_locus(locus, label: str, backend, params: DesignParameters) -> dict
     # A proceed decision is scripted in so that IF the loop consults the model,
     # it gets a plausible answer rather than falling back. A known-good design
     # should not reach it at all -- model_calls in the table below is the check.
-    agent = DesignAgent(design_fn, client=ScriptedClient([
+    agent = DesignAgent(design_fn, client=client or ScriptedClient([
         {"action": "proceed", "reason": "scripted: evidence looks acceptable",
          "primary_signal": "specificity"}]),
                         budget=Budget(max_turns=4, max_relaxations=3),
@@ -122,7 +146,8 @@ def validate_locus(locus, label: str, backend, params: DesignParameters) -> dict
         "agent_status": result.status,
         "model_calls": result.record.model_calls,
         "relaxations": result.record.relaxations_used,
-        "agreed": same and result.status == "succeeded",
+        "wall_s": _time.time() - _t0,
+        "agreed": same and statuses_consistent(det_verdict, result.status),
     }
 
 
@@ -150,8 +175,10 @@ def read_fusion_footprints(path: str) -> dict[str, str]:
 
 
 def validate_fusion(index: int, footprint: str, backend,
-                    params: DesignParameters) -> dict:
+                    params: DesignParameters, client=None) -> dict:
     """A junction is single-pair by construction; the agent must simply agree."""
+    import time as _time
+    _t0 = _time.time()
     label = f"fusion design #{index}"
     print(f"\n=== {label} ===")
     keys = sorted(systems())
@@ -175,13 +202,14 @@ def validate_fusion(index: int, footprint: str, backend,
                               [], spec)
         return result, [cand]
 
-    agent = DesignAgent(design_fn, client=ScriptedClient([
+    agent = DesignAgent(design_fn, client=client or ScriptedClient([
         {"action": "proceed", "reason": "scripted: evidence looks acceptable",
          "primary_signal": "specificity"}]),
                         budget=Budget(max_turns=3, max_relaxations=3),
                         known_systems=tuple(keys))
     result = agent.run(params, target_label=label, request="validate against manual")
-    agreed = result.status == "succeeded" and result.design.pair.p1l == sense.p1l
+    agreed = (result.design.pair.p1l == sense.p1l
+              and statuses_consistent(spec.verdict, result.status))
     print(f"  agent        : status {result.status}, "
           f"{result.record.turns_used} turn(s), "
           f"{result.record.relaxations_used} relaxation(s), "
@@ -195,6 +223,7 @@ def validate_fusion(index: int, footprint: str, backend,
         "same_primaries": result.design.pair.p1l == sense.p1l,
         "model_calls": result.record.model_calls,
         "relaxations": result.record.relaxations_used,
+        "wall_s": _time.time() - _t0,
         "agreed": agreed,
     }
 
@@ -203,13 +232,22 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--bowtie-index", default=os.environ.get("MYPIBYPY_BOWTIE_INDEX"))
     ap.add_argument("--loci", default=None)
+    ap.add_argument("--client", default="scripted",
+                    help="decision client: scripted (default), ollama, anthropic, none")
+    ap.add_argument("--enforce-window", action="store_true",
+                    help="apply the GC/Tm window as a filter, which is what "
+                         "creates the nothing-passes case worth asking a model about")
     ap.add_argument("--gc", nargs=2, type=float, default=[0.40, 0.60])
     ap.add_argument("--tm", nargs=2, type=float, default=[55.0, 62.0])
     args = ap.parse_args()
 
     backend = backend_or_none(args.bowtie_index)
+    client = build_client(args.client) if args.client != "scripted" else None
+    if client is not None:
+        print(f"decision client: {client.name}")
     params = DesignParameters(gc_min=args.gc[0], gc_max=args.gc[1],
-                              tm_min=args.tm[0], tm_max=args.tm[1])
+                              tm_min=args.tm[0], tm_max=args.tm[1],
+                              enforce_window=args.enforce_window)
     rows = []
 
     # Genomic loci whose build matches the supplied index. A mouse locus
@@ -221,25 +259,31 @@ def main() -> int:
             print(f"\n=== genomic design #{i} skipped: build "
                   f"{locus.interval.build} does not match the supplied index ===")
             continue
-        rows.append(validate_locus(locus, f"genomic design #{i}", backend, params))
+        rows.append(validate_locus(locus, f"genomic design #{i}", backend,
+                                   params, client))
 
     workbook = os.environ.get("MYPIBYPY_FUSION_WORKBOOK")
     if workbook:
         for i, (_, footprint) in enumerate(
                 sorted(read_fusion_footprints(workbook).items()), start=1):
-            rows.append(validate_fusion(i, footprint, backend, params))
+            rows.append(validate_fusion(i, footprint, backend, params, client))
     else:
         print("\n(set $MYPIBYPY_FUSION_WORKBOOK to include the fusion designs)")
 
     print("\n" + "=" * 72)
     print("AGREEMENT WITH THE VERIFIED MANUAL PATH")
     print("=" * 72)
-    print(f"{'design':<22} {'agreed':>7} {'status':>10} {'model':>6} {'relax':>6}  "
-          f"same design")
+    print(f"{'design':<22} {'agreed':>7} {'verdict':>9} {'status':>10} "
+          f"{'model':>6} {'relax':>6} {'wall':>7}  same design")
     for r in rows:
         same = r.get("same_footprint", r.get("same_primaries"))
-        print(f"{r['design']:<22} {str(r['agreed']):>7} {r['agent_status']:>10} "
-              f"{r['model_calls']:>6} {r['relaxations']:>6}  {same}")
+        print(f"{r['design']:<22} {str(r['agreed']):>7} "
+              f"{r['deterministic_verdict']:>9} {r['agent_status']:>10} "
+              f"{r['model_calls']:>6} {r['relaxations']:>6} "
+              f"{r.get('wall_s', 0):>6.1f}s  {same}")
+    print("\n'agreed' means the design matches AND the agent's status is "
+          "consistent with the deterministic verdict -- flagging a 'review' "
+          "verdict for a human counts as agreement, proceeding past it does not.")
     disagreed = [r for r in rows if not r["agreed"]]
     print(f"\n{len(rows) - len(disagreed)}/{len(rows)} designs agree with the "
           f"manual conclusion.")

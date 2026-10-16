@@ -27,6 +27,9 @@ from __future__ import annotations
 
 import json
 import os
+import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -59,6 +62,8 @@ class ModelReply:
     output_tokens: int = 0
     model: str = ""
     error: str = ""
+    attempts: int = 1
+    latency_s: float = 0.0
 
     @property
     def usable(self) -> bool:
@@ -219,3 +224,181 @@ class AnthropicDecisionClient:
             # than trusted because the API said it was valid.
             reply.error = f"decision rejected by the harness: {exc}"
         return reply
+
+
+# --- Local models ----------------------------------------------------------
+#
+# WHY LOCAL IS THE WORKING PATH, not a fallback. The lab's Anthropic account is a
+# Claude Enterprise seat, which covers chat and Claude Code but not the API, and
+# a managed user in a HIPAA-tier organisation cannot self-provision an API key.
+# So there is no key to use. `AnthropicDecisionClient` stays for when one
+# appears; `OllamaDecisionClient` is what actually runs.
+
+DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
+DEFAULT_LOCAL_MODEL = "qwen3.5:9b"
+
+ENV_OLLAMA_HOST = "MYPIBYPY_OLLAMA_HOST"
+ENV_LOCAL_MODEL = "MYPIBYPY_LOCAL_MODEL"
+ENV_CLIENT_KIND = "MYPIBYPY_DECISION_CLIENT"
+
+#: MANDATORY, and measured. qwen3.5 is a thinking model: left to itself it
+#: spends its budget reasoning instead of answering. On one identical prompt,
+#: warm, native endpoint:
+#:
+#:     think=false : ~4.6 s,  96 eval tokens, 0 thinking chars, 5/5 usable
+#:     default     : ~22 s,   74 eval tokens, 1455 thinking chars
+#:
+#: A whole design takes 2-4 s, so a 22 s decision makes the agent useless, and
+#: the failure mode reported from a longer prompt -- all thinking, no content at
+#: all -- is worse than slow. `think` is an OLLAMA-NATIVE parameter and is
+#: SILENTLY IGNORED by the OpenAI-compatible shim: measured at 21.1 s with 1455
+#: reasoning characters whether it was sent or not, i.e. identical to omitting
+#: it. That is the whole reason this client speaks to /api/chat rather than /v1.
+#: Do not "simplify" this onto the OpenAI endpoint; there is a test.
+THINK = False
+
+
+class OllamaDecisionClient:
+    """Decision client for a local Ollama model, over the native /api/chat API.
+
+    Native rather than the OpenAI-compatible endpoint because `think` only works
+    there -- see `THINK`. Schema-constrained decoding is used (`format` set to
+    the action schema), temperature is 0, and the schema is repeated in the
+    prompt as Ollama's own guidance suggests. Every response is validated and a
+    malformed or empty one is retried a bounded number of times.
+
+    Stdlib HTTP on purpose: no new dependency for one POST.
+    """
+
+    def __init__(self, model: str | None = None, host: str | None = None,
+                 timeout: float = 120.0, max_attempts: int = 3,
+                 temperature: float = 0.0):
+        self.model = model or os.environ.get(ENV_LOCAL_MODEL, DEFAULT_LOCAL_MODEL)
+        self.host = (host or os.environ.get(ENV_OLLAMA_HOST,
+                                            DEFAULT_OLLAMA_HOST)).rstrip("/")
+        self.timeout = timeout
+        self.max_attempts = max(1, max_attempts)
+        self.temperature = temperature
+        self.name = f"ollama:{self.model}"
+
+    # -- request -----------------------------------------------------------
+    def system_prompt(self, system: str) -> str:
+        """The system prompt with the schema appended.
+
+        Ollama's own guidance is to restate the schema in the prompt as well as
+        passing it in `format`; constrained decoding gets the shape right either
+        way, but restating it measurably improves which enum member is chosen.
+        """
+        return (f"{system}\n\nReply with JSON matching exactly this schema:\n"
+                f"{json.dumps(ACTION_SCHEMA)}")
+
+    def request_body(self, system: str, evidence: str) -> dict:
+        """The exact POST body. Separated so tests can assert it without a server."""
+        return {
+            "model": self.model,
+            "stream": False,
+            # Schema-constrained decoding: the enum is enforced by the sampler,
+            # not hoped for.
+            "format": ACTION_SCHEMA,
+            # See THINK. Non-negotiable.
+            "think": THINK,
+            "options": {"temperature": self.temperature},
+            "messages": [
+                {"role": "system", "content": self.system_prompt(system)},
+                {"role": "user", "content": evidence},
+            ],
+        }
+
+    # -- call --------------------------------------------------------------
+    def _post(self, body: dict) -> dict:
+        req = urllib.request.Request(
+            f"{self.host}/api/chat", data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            return json.load(resp)
+
+    def decide(self, system: str, evidence: str) -> ModelReply:
+        body = self.request_body(system, evidence)
+        last_error = ""
+        started = time.time()
+
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                payload = self._post(body)
+            except urllib.error.HTTPError as exc:
+                return ModelReply(decision=None, model=self.model, attempts=attempt,
+                                  latency_s=time.time() - started,
+                                  error=f"{self.host} returned HTTP {exc.code}: "
+                                        f"{exc.reason}")
+            except (urllib.error.URLError, OSError) as exc:
+                return ModelReply(
+                    decision=None, model=self.model, attempts=attempt,
+                    latency_s=time.time() - started,
+                    error=(f"could not reach Ollama at {self.host} ({exc}). Is the "
+                           f"server running? `ollama serve`, then `ollama pull "
+                           f"{self.model}`"))
+            except json.JSONDecodeError as exc:
+                last_error = f"Ollama response was not JSON: {exc}"
+                continue
+
+            message = payload.get("message") or {}
+            content = (message.get("content") or "").strip()
+            tokens = payload.get("eval_count") or 0
+            prompt_tokens = payload.get("prompt_eval_count") or 0
+
+            # The empty-content case: all thinking and no answer. Reported from a
+            # longer prompt than the ones measured here, and cheap to guard, so
+            # it is retried rather than trusted not to happen.
+            if not content:
+                last_error = (f"attempt {attempt}: model returned no content"
+                              + (f" ({len(message.get('thinking') or '')} chars of "
+                                 f"thinking instead)"
+                                 if message.get("thinking") else ""))
+                continue
+            try:
+                parsed = json.loads(content)
+            except json.JSONDecodeError as exc:
+                last_error = f"attempt {attempt}: content was not valid JSON ({exc})"
+                continue
+            try:
+                decision = Decision.from_payload(parsed, source="model")
+            except ParameterRefused as exc:
+                # Constrained decoding should make this impossible; it is still
+                # checked, because "the sampler guaranteed it" is not a reason to
+                # trust an action this layer has not agreed to.
+                last_error = f"attempt {attempt}: {exc}"
+                continue
+
+            return ModelReply(decision=decision, model=self.model, attempts=attempt,
+                              latency_s=time.time() - started,
+                              input_tokens=prompt_tokens, output_tokens=tokens)
+
+        return ModelReply(decision=None, model=self.model,
+                          attempts=self.max_attempts,
+                          latency_s=time.time() - started,
+                          error=f"no usable decision after {self.max_attempts} "
+                                f"attempt(s). Last: {last_error}")
+
+
+def build_client(kind: str | None = None, **kwargs) -> DecisionClient | None:
+    """Pick a decision client from configuration. Defaults to the local model.
+
+    `kind` comes from the argument, then ``$MYPIBYPY_DECISION_CLIENT``, then
+    "ollama". Swapping to a future Anthropic key, or to a different local model,
+    is therefore configuration rather than a code change.
+
+    "none" returns None, which the loop treats as "flag for review instead of
+    guessing" -- a legitimate way to run the pipeline with no model at all.
+    """
+    kind = (kind or os.environ.get(ENV_CLIENT_KIND) or "ollama").lower()
+    if kind in ("none", "off", "disabled"):
+        return None
+    if kind in ("ollama", "local"):
+        return OllamaDecisionClient(**kwargs)
+    if kind in ("anthropic", "claude", "api"):
+        return AnthropicDecisionClient(**kwargs)
+    if kind == "scripted":
+        return ScriptedClient(**kwargs)
+    raise ValueError(
+        f"unknown decision client {kind!r}; choose from ollama, anthropic, "
+        f"scripted, none")

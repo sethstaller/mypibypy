@@ -34,16 +34,25 @@ from .actions import (
     apply_action,
     clamp,
 )
-from .client import AnthropicDecisionClient, DecisionClient, ModelReply, ScriptedClient
+from .client import (
+    THINK,
+    AnthropicDecisionClient,
+    DecisionClient,
+    ModelReply,
+    OllamaDecisionClient,
+    ScriptedClient,
+    build_client,
+)
 from .loop import AgentResult, Budget, DesignAgent, Evaluation, Situation, classify
 from .record import RunRecord, RunStore
 from .tools import ScreenEvidence, WindowStats, screen_evidence, window_stats
 
 __all__ = [
-    "ACTION_SCHEMA", "BOUNDS", "RELAXING_ACTIONS", "Action", "AgentResult",
+    "ACTION_SCHEMA", "BOUNDS", "RELAXING_ACTIONS", "THINK", "Action", "AgentResult",
     "AnthropicDecisionClient", "Budget", "Decision", "DecisionClient",
     "DesignAgent", "DesignParameters", "Evaluation", "ModelReply",
-    "ParameterRefused", "RunRecord", "RunStore", "ScreenEvidence",
+    "OllamaDecisionClient", "ParameterRefused", "RunRecord", "RunStore",
+    "ScreenEvidence",
     "ScriptedClient", "Situation", "WindowStats", "apply_action", "clamp",
-    "classify", "screen_evidence", "window_stats",
+    "build_client", "classify", "screen_evidence", "window_stats",
 ]

@@ -74,7 +74,7 @@ pip install -e .          # from this directory
 Then configure your amplifier systems (see below) and run the tests:
 
 ```bash
-pytest                    # 346 tests, no PYTHONPATH needed
+pytest                    # 375 tests, no PYTHONPATH needed
 ```
 
 ## Usage
@@ -420,9 +420,69 @@ error all flag the run for human review rather than proceeding.
 and server-side fallback is opted into — routine probe design sits close enough
 to the biology classifier's territory that refusals must be handled normally.
 
-The endpoint is swappable: `DecisionClient` is a protocol, `base_url` is passed
-through for an Anthropic-compatible gateway, and a local model speaking another
-protocol needs only its own `DecisionClient`.
+### Which model
+
+**A local model is the working path, not a fallback.** The lab's Anthropic
+account is a Claude Enterprise seat, which covers chat and Claude Code but not
+the API, and a managed user in a HIPAA-tier organisation cannot self-provision a
+key — so there is no key to use. `AnthropicDecisionClient` remains for when one
+appears; `OllamaDecisionClient` is what runs.
+
+```bash
+export MYPIBYPY_DECISION_CLIENT=ollama        # the default
+export MYPIBYPY_LOCAL_MODEL=qwen3.5:9b
+export MYPIBYPY_OLLAMA_HOST=http://127.0.0.1:11434
+```
+
+`build_client()` resolves the kind from argument → env → `ollama`, so swapping
+to an API key or a different local model is configuration, not code.
+
+**`think: false` is mandatory, and measured.** qwen3.5 is a thinking model;
+left alone it spends its budget reasoning instead of answering. On one identical
+prompt, warm:
+
+| | wall | eval tokens | thinking chars | usable |
+|---|---|---|---|---|
+| native, `think: false` | **4.6 s** | 96 | 0 | 5/5 |
+| native, default | 22 s | 74 | 1455 | 3/3 |
+| OpenAI `/v1`, `think: false` sent | 21.1 s | 74 | 1455 | — |
+| OpenAI `/v1`, not sent | 21.3 s | 74 | 1455 | — |
+
+A whole design takes 2–4 s, so a 22 s decision makes the agent useless. **`think`
+is Ollama-native and the OpenAI-compatible endpoint ignores it silently** — the
+last two rows are identical — which is the whole reason this client speaks to
+`/api/chat` rather than `/v1`. There are tests for both facts.
+
+Decoding is schema-constrained (`format` set to the action enum), temperature 0,
+with the schema restated in the prompt as Ollama's guidance suggests. Every
+response is validated and a malformed or empty one is retried up to three times.
+
+**Prose never drives control flow.** In local-model trials the constrained
+action was right while the sentence explaining it was backwards — it chose
+`relax_gc` and then described *lowering* the upper GC limit, which is the
+opposite of what `relax_gc` does. The enum is acted on; the reason string is
+only ever displayed, labelled as the model's comment, and never parsed. Tests
+assert that `apply_action` cannot even see it.
+
+### Validation with the local model
+
+| design | agrees | deterministic verdict | agent status | model calls | wall |
+|---|---|---|---|---|---|
+| genomic (hg38) | yes | pass | succeeded | 0 | 5.9 s |
+| fusion #1 | yes | pass | succeeded | 0 | 0.9 s |
+| fusion #2 | yes | review | flagged | 1 | 6.5 s |
+
+Same footprint and primaries in all three, and the two `pass` designs still
+consult no model at all. Agreement means the design matches **and** the status
+is consistent with the deterministic verdict: flagging a `review` verdict for a
+human counts as agreement; sailing past it with `proceed` does not.
+
+Driven into the nothing-passes case (the lab's GC 0.40–0.60 / Tm 55–62 applied
+as a filter, where 0 of 1692 windows survive), the loop followed the limiting
+constraint each turn — `relax_tm` while Tm was limiting, then `relax_gc` once
+the limiter flipped to GC — reaching 12 of 1692 windows, and then stopped itself
+at `flag_for_review` after two of its three relaxations rather than loosening
+further. 24 s, 3 model calls, every step in the run record.
 
 ### Validation against the verified designs
 
