@@ -91,11 +91,23 @@ class ScriptedClient:
     name = "scripted"
 
     def __init__(self, decisions: list[dict] | None = None,
-                 refuse: bool = False, error: str = ""):
+                 refuse: bool = False, error: str = "",
+                 structured_replies: list[dict] | None = None):
         self._decisions = list(decisions or [])
         self.refuse = refuse
         self.error = error
+        self._structured = list(structured_replies or [])
         self.calls: list[tuple[str, str]] = []
+        self.structured_calls: list[tuple[str, str, dict]] = []
+
+    def structured(self, system: str, user: str, schema: dict,
+                   ) -> tuple[dict | None, str, float]:
+        self.structured_calls.append((system, user, schema))
+        if self.error:
+            return None, self.error, 0.0
+        if not self._structured:
+            return None, "scripted client has no structured reply queued", 0.0
+        return self._structured.pop(0), "", 0.0
 
     def decide(self, system: str, evidence: str) -> ModelReply:
         self.calls.append((system, evidence))
@@ -171,6 +183,32 @@ class AnthropicDecisionClient:
             kwargs["betas"] = [FALLBACK_BETA]
             kwargs["fallbacks"] = "default"
         return kwargs
+
+    def structured(self, system: str, user: str, schema: dict,
+                   ) -> tuple[dict | None, str, float]:
+        """Schema-constrained call for non-decision work (chat intents)."""
+        import anthropic
+
+        kwargs = self.request_kwargs(system, user)
+        kwargs["output_config"]["format"]["schema"] = schema
+        started = time.time()
+        try:
+            response = (self._client.beta.messages.create(**kwargs)
+                        if self.use_fallbacks else
+                        self._client.messages.create(**kwargs))
+        except (anthropic.APIStatusError, anthropic.APIConnectionError) as exc:
+            return None, str(exc), time.time() - started
+        if getattr(response, "stop_reason", None) == "refusal":
+            details = getattr(response, "stop_details", None)
+            return None, (f"model declined (category "
+                          f"{getattr(details, 'category', '') or 'unspecified'})"), \
+                time.time() - started
+        text = next((b.text for b in response.content if b.type == "text"), "")
+        try:
+            return json.loads(text), "", time.time() - started
+        except json.JSONDecodeError as exc:
+            return None, f"structured output was not valid JSON: {exc}", \
+                time.time() - started
 
     def decide(self, system: str, evidence: str) -> ModelReply:
         import anthropic
@@ -282,7 +320,7 @@ class OllamaDecisionClient:
         self.name = f"ollama:{self.model}"
 
     # -- request -----------------------------------------------------------
-    def system_prompt(self, system: str) -> str:
+    def system_prompt(self, system: str, schema: dict | None = None) -> str:
         """The system prompt with the schema appended.
 
         Ollama's own guidance is to restate the schema in the prompt as well as
@@ -290,21 +328,22 @@ class OllamaDecisionClient:
         way, but restating it measurably improves which enum member is chosen.
         """
         return (f"{system}\n\nReply with JSON matching exactly this schema:\n"
-                f"{json.dumps(ACTION_SCHEMA)}")
+                f"{json.dumps(schema or ACTION_SCHEMA)}")
 
-    def request_body(self, system: str, evidence: str) -> dict:
+    def request_body(self, system: str, evidence: str,
+                     schema: dict | None = None) -> dict:
         """The exact POST body. Separated so tests can assert it without a server."""
         return {
             "model": self.model,
             "stream": False,
             # Schema-constrained decoding: the enum is enforced by the sampler,
             # not hoped for.
-            "format": ACTION_SCHEMA,
+            "format": schema or ACTION_SCHEMA,
             # See THINK. Non-negotiable.
             "think": THINK,
             "options": {"temperature": self.temperature},
             "messages": [
-                {"role": "system", "content": self.system_prompt(system)},
+                {"role": "system", "content": self.system_prompt(system, schema)},
                 {"role": "user", "content": evidence},
             ],
         }
@@ -316,6 +355,34 @@ class OllamaDecisionClient:
             headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
             return json.load(resp)
+
+    def structured(self, system: str, user: str, schema: dict,
+                   ) -> tuple[dict | None, str, float]:
+        """One schema-constrained call returning raw JSON. (payload, error, seconds).
+
+        Used for anything that is not a design decision -- currently turning a
+        chat request into parameters. Validation of the payload belongs to the
+        caller, which knows the schema's meaning; this only guarantees it parsed.
+        """
+        body = self.request_body(system, user, schema=schema)
+        started = time.time()
+        last = ""
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                payload = self._post(body)
+            except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
+                return None, f"could not reach Ollama at {self.host}: {exc}", \
+                    time.time() - started
+            content = ((payload.get("message") or {}).get("content") or "").strip()
+            if not content:
+                last = f"attempt {attempt}: no content returned"
+                continue
+            try:
+                return json.loads(content), "", time.time() - started
+            except json.JSONDecodeError as exc:
+                last = f"attempt {attempt}: not valid JSON ({exc})"
+        return None, (f"no usable reply after {self.max_attempts} attempt(s). "
+                      f"Last: {last}"), time.time() - started
 
     def decide(self, system: str, evidence: str) -> ModelReply:
         body = self.request_body(system, evidence)

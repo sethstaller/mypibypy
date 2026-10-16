@@ -74,7 +74,7 @@ pip install -e .          # from this directory
 Then configure your amplifier systems (see below) and run the tests:
 
 ```bash
-pytest                    # 375 tests, no PYTHONPATH needed
+pytest                    # 410 tests, no PYTHONPATH needed
 ```
 
 ## Usage
@@ -538,6 +538,36 @@ there is no need for a job queue, progress streaming or async machinery.
 
 The pure logic lives in `mypibypy/ui.py` so it can be tested without a browser;
 the layout was verified by running the app.
+
+### Chat
+
+Switch **Interface** to *Chat* and talk to it:
+
+> **design 3 pairs in cy5 for mm10 chr5:142906255-142906754**
+> *Model comment (6.3s): Design parameters set for 3 pairs in cy5.*
+> **Applied:** channel → cy5; pairs → 3
+> 3 pair(s) designed against `mm10 chr5:142,906,255-142,906,754`.
+> ⚠️ No specificity screen ran for 3 of 3 pair(s) …
+
+> **too few passed, loosen the Tm**
+> **Applied:** Tm window 55.0-62.0 → 53.5-63.5 C
+
+The model does **exactly two things** in this path: turn a request into
+parameters, and choose which constraint gives when nothing passes. The design,
+the screens, the thermodynamics and the workbook are all deterministic.
+
+**The target is never the model's.** It is pulled out of the user's own words by
+`intent.extract_target`, a strict pattern in the harness — so a pasted run of
+bases cannot become something the pipeline reads, and the intent schema has no
+field for a region, an accession or a sequence at all. An intent carrying one is
+*refused*, not ignored. This is the place the guarantee is most likely to erode
+once a conversation is involved, so `tests/test_chat.py` attacks it directly.
+
+Numbers arriving from chat go through the same `clamp` as numbers typed into the
+form — less trustworthy, if anything. The model's sentence is shown as
+*"Model comment"* and never interpreted. And when a relaxation is asked for while
+the GC/Tm window is not being enforced, the reply says so, rather than reporting
+a change that had no effect.
 
 ## Recording what happened
 
