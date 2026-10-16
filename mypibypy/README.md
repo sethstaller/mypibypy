@@ -74,7 +74,7 @@ pip install -e .          # from this directory
 Then configure your amplifier systems (see below) and run the tests:
 
 ```bash
-pytest                    # 334 tests, no PYTHONPATH needed
+pytest                    # 346 tests, no PYTHONPATH needed
 ```
 
 ## Usage
@@ -134,6 +134,7 @@ example systems or example loci are in use -- those outputs are not orderable.
 | `accessibility.py` | RNA target-site secondary structure (RNAplfold)                |
 | `outcomes.py`    | design → imaging-result record, for calibrating thresholds later |
 | `agent/`         | the agent loop: closed actions, bounds, budgets, run record      |
+| `ui.py`          | presentation helpers for the Streamlit app (testable apart from it) |
 | `workbook.py`    | render the order workbook (ORDER_ssDNA / Parts list / per-locus) |
 | `cli.py`         | `python -m mypibypy`                                             |
 
@@ -446,6 +447,37 @@ design** — at one real locus, zero of 1692 windows satisfy GC 0.40–0.60 and 
 penalises GC/Tm distance and never rejects on it. Hard windows are now opt-in
 (`enforce_window`), so the default reproduces the verified path exactly and the
 loop only relaxes a constraint someone actually imposed.
+
+## The browser UI
+
+```bash
+cd mypibypy && streamlit run app.py
+```
+
+A form, a table and a download, in about 280 lines. Pick a target (region,
+accession, or a fusion entry from your loci file), choose the channel, pair
+count and spacing, run, read the candidates, download the workbook. The React
+path was considered and declined: measured runtimes are ~2 s for a single-pair
+hg38 design and ~4 s for six tiled pairs, so Streamlit's rerun model is fine and
+there is no need for a job queue, progress streaming or async machinery.
+
+- `st.cache_data` on the sequence and transcript fetches, `st.cache_resource` for
+  the amplifier registry and the aligner handle. Caching is **memory-only** on
+  purpose — `persist="disk"` would write real target sequence into Streamlit's
+  cache directory.
+- A missing screen renders as the words `NOT SCREENED`, and an unevaluated
+  accessibility as `not evaluated`, never as a blank cell. A table is exactly
+  where an absent result would otherwise read as a passing one.
+- The workbook is rendered into memory and offered as a download; probe
+  sequences are never written anywhere inside the repository.
+- Tick **Run through the agent loop** to see the classifier's decision, the run
+  record and why each step happened — including whether the model was consulted
+  at all.
+- The sidebar always names the `systems.local.json` actually in use, and says
+  loudly when the synthetic examples are loaded.
+
+The pure logic lives in `mypibypy/ui.py` so it can be tested without a browser;
+the layout was verified by running the app.
 
 ## Recording what happened
 

@@ -51,8 +51,9 @@ decoy_bench/
 # Abandoned prototype
 pifish-agent/
 
-# Editor settings: contain machine-specific interpreter paths
+# Editor and tooling settings: contain machine-specific interpreter paths
 .vscode/
+.claude/
 
 # Output of the removed NCBI web BLAST step (it never returned usable results)
 blast_*.txt
