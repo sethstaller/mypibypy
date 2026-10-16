@@ -296,6 +296,10 @@ ENV_CLIENT_KIND = "MYPIBYPY_DECISION_CLIENT"
 THINK = False
 
 
+NUM_CTX = 4096
+NUM_PREDICT = 512
+
+
 class OllamaDecisionClient:
     """Decision client for a local Ollama model, over the native /api/chat API.
 
@@ -341,7 +345,10 @@ class OllamaDecisionClient:
             "format": schema or ACTION_SCHEMA,
             # See THINK. Non-negotiable.
             "think": THINK,
-            "options": {"temperature": self.temperature},
+            # Bounded on purpose: an unbounded context allocates a large KV
+            # cache, and unbounded generation can run until the timeout.
+            "options": {"temperature": self.temperature,
+                        "num_ctx": NUM_CTX, "num_predict": NUM_PREDICT},
             "messages": [
                 {"role": "system", "content": self.system_prompt(system, schema)},
                 {"role": "user", "content": evidence},
